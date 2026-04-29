@@ -23,8 +23,6 @@ jobs:
       - name: Build
         run: npm run build
         env:
-          VITE_GROQ_API_KEY: ${{ secrets.VITE_GROQ_API_KEY }}
-          VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
           VITE_WORKER_URL: ${{ secrets.VITE_WORKER_URL }}
           VITE_GITHUB_CLIENT_ID: ${{ secrets.VITE_GITHUB_CLIENT_ID }}
 

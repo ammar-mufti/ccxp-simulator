@@ -1,10 +1,30 @@
 import { useState, useCallback } from 'react'
-import { llmJson, llmCall } from '../services/llm'
+import { callLLM } from '../services/llm'
 import { cacheGet, cacheSet, cacheKey } from '../services/contentCache'
 import type { TopicContent, Flashcard, QuizQuestion } from '../store/learnStore'
 import { DOMAIN_TOPICS } from '../store/learnStore'
+import { useAuthStore } from '../store/authStore'
+
+function parseWorkerJson<T>(raw: unknown, fallback: T): T {
+  try {
+    if (typeof raw === 'string') {
+      const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+      const arrMatch = cleaned.match(/\[[\s\S]*\]/)
+      if (arrMatch) return JSON.parse(arrMatch[0]) as T
+      return JSON.parse(cleaned) as T
+    }
+    if (Array.isArray(raw)) return raw as T
+    if (raw && typeof raw === 'object' && 'content' in raw) {
+      return parseWorkerJson((raw as { content: unknown }).content, fallback)
+    }
+    return fallback
+  } catch {
+    return fallback
+  }
+}
 
 export function useContentGen(domain: string) {
+  const token = useAuthStore(s => s.token) ?? ''
   const [overview, setOverview] = useState<string | null>(null)
   const [topics, setTopics] = useState<TopicContent[] | null>(null)
   const [flashcards, setFlashcards] = useState<Flashcard[] | null>(null)
@@ -21,10 +41,10 @@ export function useContentGen(domain: string) {
     if (cached) { setOverview(cached); return }
     setLoad('overview', true); setErr('overview', null)
     try {
-      const prompt = `You are a CCXP exam coach. Write a study overview for domain: "${domain}".
-Cover: what it covers, why it matters, connections to other domains, what to expect on the exam. Max 220 words. Plain paragraphs only. Plain text.`
-      const text = await llmCall(prompt)
-      const result = text || `${domain} is a core CCXP domain covering essential customer experience principles. Study the key topics and frameworks carefully.`
+      const raw = await callLLM({ type: 'generate-content', domain, extra: 'overview' }, token)
+      const text = typeof raw === 'string' ? raw
+        : (raw as { content?: string })?.content ?? ''
+      const result = text || `${domain} is a core CCXP domain covering essential customer experience principles.`
       cacheSet(ck, result)
       setOverview(result)
     } catch {
@@ -32,7 +52,7 @@ Cover: what it covers, why it matters, connections to other domains, what to exp
     } finally {
       setLoad('overview', false)
     }
-  }, [domain])
+  }, [domain, token])
 
   const loadTopics = useCallback(async () => {
     const ck = cacheKey(domain, 'topics')
@@ -41,21 +61,11 @@ Cover: what it covers, why it matters, connections to other domains, what to exp
     setLoad('topics', true); setErr('topics', null)
     try {
       const topicList = DOMAIN_TOPICS[domain] ?? []
-      const prompt = `You are a CCXP exam coach. Generate study content for ${topicList.length} topics in domain: "${domain}". Topics: ${topicList.join(', ')}
-
-Respond ONLY with raw JSON array:
-[{
-  "topic": "Topic Name",
-  "explanation": "150-word explanation",
-  "example": "Real-world example, 2-3 sentences",
-  "examTrap": "Common mistake on exam questions about this topic",
-  "keyTerms": [{"term": "...","definition": "one sentence"}]
-}]
-No markdown, no preamble. Raw JSON array only.`
-      const result = await llmJson<TopicContent[]>(prompt, [])
+      const raw = await callLLM({ type: 'generate-content', domain, extra: 'topics' }, token)
+      const result = parseWorkerJson<TopicContent[]>(raw, [])
       const final = result.length > 0 ? result : topicList.map(t => ({
         topic: t,
-        explanation: `${t} is a key concept in ${domain}. Study the core principles and how they apply to customer experience management.`,
+        explanation: `${t} is a key concept in ${domain}.`,
         example: 'Experienced CX teams apply this in real-world customer interactions.',
         examTrap: 'Watch for questions that confuse this with related but distinct concepts.',
         keyTerms: [],
@@ -67,7 +77,7 @@ No markdown, no preamble. Raw JSON array only.`
     } finally {
       setLoad('topics', false)
     }
-  }, [domain])
+  }, [domain, token])
 
   const loadFlashcards = useCallback(async () => {
     const ck = cacheKey(domain, 'flashcards')
@@ -75,16 +85,11 @@ No markdown, no preamble. Raw JSON array only.`
     if (cached) { setFlashcards(cached); return }
     setLoad('flashcards', true); setErr('flashcards', null)
     try {
-      const prompt = `Generate 10 flashcards for CCXP domain: "${domain}".
-Mix: 4 key terms, 3 scenario-based, 3 framework recall.
-
-Respond ONLY with raw JSON array:
-[{"front":"max 20 words","back":"max 40 words","why":"one sentence"}]
-No markdown. Raw JSON only.`
-      const result = await llmJson<Flashcard[]>(prompt, [])
+      const raw = await callLLM({ type: 'generate-content', domain, extra: 'flashcards' }, token)
+      const result = parseWorkerJson<Flashcard[]>(raw, [])
       const final = result.length > 0 ? result : [
-        { front: `What is the primary goal of ${domain}?`, back: 'To improve customer experiences by applying systematic approaches and frameworks.', why: 'Foundation concept for this domain.' },
-        { front: 'Name a key framework in this domain', back: 'Multiple frameworks exist; focus on the ones most tested in CCXP exams.', why: 'Framework recall is heavily tested.' },
+        { front: `What is the primary goal of ${domain}?`, back: 'To improve customer experiences by applying systematic approaches.', why: 'Foundation concept.' },
+        { front: 'Name a key framework in this domain', back: 'Multiple frameworks exist; focus on those most tested in CCXP exams.', why: 'Framework recall is heavily tested.' },
       ]
       cacheSet(ck, final)
       setFlashcards(final)
@@ -93,7 +98,7 @@ No markdown. Raw JSON only.`
     } finally {
       setLoad('flashcards', false)
     }
-  }, [domain])
+  }, [domain, token])
 
   const loadQuiz = useCallback(async () => {
     const ck = cacheKey(domain, 'quiz')
@@ -101,13 +106,8 @@ No markdown. Raw JSON only.`
     if (cached) { setQuiz(cached); return }
     setLoad('quiz', true); setErr('quiz', null)
     try {
-      const prompt = `Generate 5 practice questions for CCXP domain: "${domain}".
-Explanations should be educational (2-3 sentences).
-
-Respond ONLY with raw JSON array:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"2-3 sentence educational explanation"}]
-No markdown. Raw JSON only.`
-      const result = await llmJson<QuizQuestion[]>(prompt, [])
+      const raw = await callLLM({ type: 'generate-content', domain, extra: 'quiz' }, token)
+      const result = parseWorkerJson<QuizQuestion[]>(raw, [])
       const final = result.length > 0 ? result : [{
         q: `Which approach best represents ${domain}?`,
         a: 'Reactive problem solving only',
@@ -115,7 +115,7 @@ No markdown. Raw JSON only.`
         c: 'Cost reduction focus',
         d: 'Technology-first implementation',
         correct: 'b',
-        explanation: `${domain} requires a proactive, strategic approach. Customer-centricity must be embedded in all decisions and processes.`,
+        explanation: `${domain} requires a proactive, strategic approach embedded in all decisions.`,
       }]
       cacheSet(ck, final)
       setQuiz(final)
@@ -124,7 +124,7 @@ No markdown. Raw JSON only.`
     } finally {
       setLoad('quiz', false)
     }
-  }, [domain])
+  }, [domain, token])
 
   return { overview, topics, flashcards, quiz, loading, error, loadOverview, loadTopics, loadFlashcards, loadQuiz }
 }

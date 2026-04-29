@@ -1,32 +1,8 @@
 import { useCallback } from 'react'
-import { llmJson } from '../services/llm'
+import { callLLM } from '../services/llm'
 import type { Question, ExamMode } from '../store/examStore'
 import { DOMAIN_WEIGHTS } from '../store/examStore'
-
-const DOMAIN_CONTEXT: Record<string, string> = {
-  'CX Strategy': 'vision, business case, maturity models, roadmap, governance',
-  'Customer-Centric Culture': 'culture change, employee engagement, leadership buy-in, behaviors',
-  'Voice of Customer': 'VoC programs, listening posts, research methods, insight, closed loop',
-  'Experience Design': 'journey mapping, service design, design thinking, prototyping',
-  'Metrics & Measurement': 'NPS, CSAT, CES, ROI, linkage analysis, dashboards, benchmarking',
-  'Organizational Adoption': 'change management, cross-functional alignment, CX roles, governance',
-}
-
-function buildPrompt(domain: string, count: number): string {
-  return `You are a CCXP exam question writer. Generate exactly ${count} multiple-choice questions for domain: "${domain}".
-
-Rules:
-- Realistic CCXP difficulty (CXPA standard)
-- 4 choices: a, b, c, d — exactly ONE correct answer
-- Explanation must be under 25 words
-- Vary types: scenario, definition, best-practice, framework
-- Output ONLY a raw JSON array, no markdown, no preamble
-
-Format:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"...","id":"${crypto.randomUUID()}"}]
-
-Domain context: ${DOMAIN_CONTEXT[domain] ?? domain}`
-}
+import { useAuthStore } from '../store/authStore'
 
 const FALLBACK_QUESTION = (domain: string): Question => ({
   id: crypto.randomUUID(),
@@ -40,7 +16,30 @@ const FALLBACK_QUESTION = (domain: string): Question => ({
   domain,
 })
 
+function parseQuestions(raw: unknown, domain: string, count: number): Question[] {
+  try {
+    let arr: unknown[] = []
+    if (Array.isArray(raw)) {
+      arr = raw
+    } else if (typeof raw === 'string') {
+      const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+      const match = cleaned.match(/\[[\s\S]*\]/)
+      if (match) arr = JSON.parse(match[0])
+    } else if (raw && typeof raw === 'object' && 'content' in raw) {
+      return parseQuestions((raw as { content: unknown }).content, domain, count)
+    }
+    if (arr.length > 0) {
+      return arr.map(q => ({ ...(q as object), id: crypto.randomUUID(), domain })) as Question[]
+    }
+  } catch {
+    // fall through to fallback
+  }
+  return Array.from({ length: count }, () => FALLBACK_QUESTION(domain))
+}
+
 export function useQuestionGen() {
+  const token = useAuthStore(s => s.token) ?? ''
+
   const generateForMode = useCallback(async (
     mode: ExamMode,
     domain: string | null,
@@ -50,33 +49,29 @@ export function useQuestionGen() {
     const domains = domain ? [domain] : Object.keys(weights)
     const allQuestions: Question[] = []
 
-    let totalChunks = 0
     const chunks: Array<{ domain: string; count: number }> = []
     for (const d of domains) {
-      const total = domain ? weights[d] ?? 10 : weights[d] ?? 0
+      const total = domain ? (weights[d] ?? 10) : (weights[d] ?? 0)
       for (let i = 0; i < total; i += 5) {
         chunks.push({ domain: d, count: Math.min(5, total - i) })
-        totalChunks++
       }
     }
 
-    let loaded = 0
-    onProgress(0, totalChunks)
+    onProgress(0, chunks.length)
 
-    for (const chunk of chunks) {
-      const prompt = buildPrompt(chunk.domain, chunk.count)
-      type RawQ = Omit<Question, 'domain'>
-      const parsed = await llmJson<RawQ[]>(prompt, [])
-      const questions: Question[] = parsed.length > 0
-        ? parsed.map(q => ({ ...q, id: crypto.randomUUID(), domain: chunk.domain }))
-        : Array.from({ length: chunk.count }, () => FALLBACK_QUESTION(chunk.domain))
-      allQuestions.push(...questions)
-      loaded++
-      onProgress(loaded, totalChunks)
+    for (let i = 0; i < chunks.length; i++) {
+      const { domain: d, count } = chunks[i]
+      try {
+        const raw = await callLLM({ type: 'generate-questions', domain: d, count }, token)
+        allQuestions.push(...parseQuestions(raw, d, count))
+      } catch {
+        allQuestions.push(...Array.from({ length: count }, () => FALLBACK_QUESTION(d)))
+      }
+      onProgress(i + 1, chunks.length)
     }
 
     return allQuestions
-  }, [])
+  }, [token])
 
   return { generateForMode }
 }

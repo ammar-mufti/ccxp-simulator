@@ -1,26 +1,19 @@
-const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
-const MODEL = 'llama-3.3-70b-versatile'
+export interface LLMPayload {
+  type: 'generate-questions' | 'generate-content' | 'study-plan'
+  domain: string
+  count?: number
+  extra?: string
+}
 
-export async function callGroq(prompt: string): Promise<string> {
-  const res = await fetch(GROQ_URL, {
+export async function callLLM(payload: LLMPayload, token: string): Promise<unknown> {
+  const res = await fetch(`${import.meta.env.VITE_WORKER_URL}/api/llm`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${import.meta.env.VITE_GROQ_API_KEY}`,
+      Authorization: `Bearer ${token}`,
     },
-    body: JSON.stringify({
-      model: MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: 2048,
-      temperature: 0.4,
-    }),
+    body: JSON.stringify(payload),
   })
-
-  if (res.status === 429) throw new Error('RATE_LIMIT')
-  if (!res.ok) throw new Error(`Groq error ${res.status}`)
-
-  const data = await res.json()
-  const choice = data.choices?.[0]
-  if (choice?.finish_reason === 'length') throw new Error('MAX_TOKENS')
-  return choice?.message?.content ?? ''
+  if (!res.ok) throw new Error(`Worker error: ${res.status}`)
+  return res.json()
 }

@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { llmJson } from '../../services/llm'
+import { callLLM } from '../../services/llm'
 import type { Question } from '../../store/examStore'
 import { useLearnStore } from '../../store/learnStore'
+import { useAuthStore } from '../../store/authStore'
 
 interface Tip { domain: string; tips: string[] }
 
@@ -16,6 +17,7 @@ export default function StudyPlan({ questions, answers }: Props) {
   const [loading, setLoading] = useState(false)
   const navigate = useNavigate()
   const { setActiveDomain } = useLearnStore()
+  const token = useAuthStore(s => s.token) ?? ''
 
   const weakDomains = (() => {
     const domains = [...new Set(questions.map(q => q.domain))]
@@ -33,15 +35,30 @@ export default function StudyPlan({ questions, answers }: Props) {
   useEffect(() => {
     if (weakDomains.length === 0) return
     setLoading(true)
-    const prompt = `You are a CCXP exam coach. A student just finished a practice exam.
-Their 3 weakest domains are: ${weakDomains.join(', ')}.
-Generate 3 specific study tips for each domain.
+    callLLM({
+      type: 'study-plan',
+      domain: weakDomains.join(','),
+    }, token).then(raw => {
+      let result: Tip[] = []
+      try {
+        const data = Array.isArray(raw) ? raw
+          : typeof raw === 'string'
+          ? JSON.parse((raw.match(/\[[\s\S]*\]/) ?? ['[]'])[0])
+          : (raw as { content?: unknown })?.content ?? []
+        result = Array.isArray(data) ? data as Tip[] : []
+      } catch { /* use fallback */ }
 
-Respond ONLY with raw JSON array:
-[{"domain":"...","tips":["tip1","tip2","tip3"]}]
-No markdown. Raw JSON only.`
-    llmJson<Tip[]>(prompt, []).then(result => {
       setPlan(result.length > 0 ? result : weakDomains.map(d => ({
+        domain: d,
+        tips: [
+          `Review core concepts and frameworks in ${d}`,
+          'Practice scenario-based questions for this domain',
+          'Study the CXPA body of knowledge for this area',
+        ],
+      })))
+      setLoading(false)
+    }).catch(() => {
+      setPlan(weakDomains.map(d => ({
         domain: d,
         tips: [
           `Review core concepts and frameworks in ${d}`,
@@ -76,10 +93,7 @@ No markdown. Raw JSON only.`
           <div key={domain} className="bg-ink rounded-xl border border-white/10 p-4">
             <div className="flex items-center justify-between mb-3">
               <h4 className="text-cream font-medium">{domain}</h4>
-              <button
-                onClick={() => goStudy(domain)}
-                className="text-gold text-xs hover:underline"
-              >
+              <button onClick={() => goStudy(domain)} className="text-gold text-xs hover:underline">
                 Study this domain →
               </button>
             </div>

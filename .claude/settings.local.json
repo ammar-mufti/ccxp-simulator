@@ -9,7 +9,16 @@
       "Bash(npx tailwindcss *)",
       "Bash(./node_modules/.bin/tailwindcss init *)",
       "Bash(npm run *)",
-      "Bash(./node_modules/.bin/wrangler deploy *)"
+      "Bash(./node_modules/.bin/wrangler deploy *)",
+      "Bash(git config *)",
+      "Bash(git commit -m ' *)",
+      "Bash(gh repo *)",
+      "PowerShell(gh repo *)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "Bash(git commit *)",
+      "Bash(git add *)"
     ]
   }
 }
