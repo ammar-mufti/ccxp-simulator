@@ -130,14 +130,14 @@ No markdown. Raw JSON only.`
   return `Answer this CCXP question about ${domain}.`
 }
 
-async function callGroq(prompt: string, apiKey: string): Promise<string> {
+async function callGroq(prompt: string, apiKey: string, maxTokens = 2048): Promise<string> {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({
       model: 'llama-3.3-70b-versatile',
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 2048,
+      max_tokens: maxTokens,
       temperature: 0.4,
     }),
   })
@@ -164,9 +164,9 @@ async function callGemini(prompt: string, apiKey: string): Promise<string> {
   return data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
 }
 
-async function llm(prompt: string, env: Env): Promise<string> {
+async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
   try {
-    return await callGroq(prompt, env.GROQ_API_KEY)
+    return await callGroq(prompt, env.GROQ_API_KEY, maxTokens)
   } catch (err) {
     if (err instanceof Error && err.message === 'RATE_LIMIT') {
       await new Promise(r => setTimeout(r, 3000))
@@ -185,7 +185,10 @@ export default {
     const origin = request.headers.get('Origin') ?? ''
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: corsHeaders(origin) })
+      return new Response(null, {
+        status: 204,
+        headers: { ...corsHeaders(origin), 'Access-Control-Max-Age': '86400' },
+      })
     }
 
     // GitHub OAuth login
@@ -313,19 +316,57 @@ Keep total response under 150 words. Bold key CX terms. Domain: ${body.domain}`
         return jsonRes({ explanation: raw }, 200, origin)
       }
 
-      // ── Content generation (existing) ────────────────────────────────────
-      const prompt = buildPrompt(body.type, body.domain, body.count, body.extra)
-      const raw = await llm(prompt, env)
+      // ── Generate content (overview / topics / flashcards / quiz) ─────────
+      if (body.type === 'generate-content') {
+        const extra = body.extra ?? ''
+        const maxTok = extra === 'topics' ? 4000 : 2048
+        const prompt = buildPrompt('generate-content', body.domain, undefined, extra)
+        const raw = await llm(prompt, env, maxTok)
 
-      if (body.extra === 'overview') {
-        return jsonRes({ content: raw }, 200, origin)
+        if (extra === 'overview') {
+          // Return plain text wrapped in { content }
+          return jsonRes({ content: raw || `${body.domain} is a core CCXP domain.` }, 200, origin)
+        }
+
+        // topics / flashcards / quiz — parse JSON array
+        try {
+          const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+          const match = cleaned.match(/\[[\s\S]*\]/)
+          if (!match) throw new Error('No JSON array found')
+          const parsed = JSON.parse(match[0])
+          if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')
+          return jsonRes({ data: parsed }, 200, origin)
+        } catch (parseErr) {
+          // Return the raw text so the frontend can attempt client-side parsing or use fallback
+          return jsonRes({ content: raw, parseError: String(parseErr) }, 200, origin)
+        }
       }
-      try {
-        const parsed = JSON.parse(extractJson(raw))
-        return jsonRes(parsed, 200, origin)
-      } catch {
-        return jsonRes({ content: raw }, 200, origin)
+
+      // ── Generate questions ────────────────────────────────────────────────
+      if (body.type === 'generate-questions') {
+        const prompt = buildPrompt('generate-questions', body.domain, body.count, body.extra)
+        const raw = await llm(prompt, env)
+        try {
+          const parsed = JSON.parse(extractJson(raw))
+          return jsonRes(parsed, 200, origin)
+        } catch {
+          return jsonRes({ content: raw }, 200, origin)
+        }
       }
+
+      // ── Study plan ────────────────────────────────────────────────────────
+      if (body.type === 'study-plan') {
+        const prompt = buildPrompt('study-plan', body.domain, undefined, body.extra)
+        const raw = await llm(prompt, env)
+        try {
+          const parsed = JSON.parse(extractJson(raw))
+          return jsonRes(parsed, 200, origin)
+        } catch {
+          return jsonRes({ content: raw }, 200, origin)
+        }
+      }
+
+      return jsonRes({ error: 'Unknown request type' }, 400, origin)
     }
 
     return jsonRes({ status: 'ccxp-auth worker running' }, 200, origin)
