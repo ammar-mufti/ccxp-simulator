@@ -1,12 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useExamStore } from '../../store/examStore'
 import { useQuestionGen, type GenProgress } from '../../hooks/useQuestionGen'
+
+const STUCK_THRESHOLD_MS = 30_000
 
 export default function LoadingScreen() {
   const { mode, selectedDomain, setQuestions, setLoading, setError, error } = useExamStore()
   const { generateForMode } = useQuestionGen()
   const navigate = useNavigate()
+
   const [progress, setProgress] = useState<GenProgress>({
     percent: 0,
     collected: 0,
@@ -14,11 +17,27 @@ export default function LoadingScreen() {
     currentDomain: '',
     message: 'Preparing questions…',
   })
+  const [stuck, setStuck] = useState(false)
+
+  // Track last progress update time to detect stalls
+  const lastUpdateRef = useRef(Date.now())
+  const collectedRef = useRef(0)
+  const generatedRef = useRef<ReturnType<typeof generateForMode> | null>(null)
+
+  const handleProgress = (p: GenProgress) => {
+    setProgress(p)
+    lastUpdateRef.current = Date.now()
+    collectedRef.current = p.collected
+    setStuck(false)
+  }
 
   useEffect(() => {
     if (!mode) { navigate('/exam'); return }
 
-    generateForMode(mode, selectedDomain, setProgress)
+    const promise = generateForMode(mode, selectedDomain, handleProgress)
+    generatedRef.current = promise
+
+    promise
       .then(questions => {
         setQuestions(questions)
         setLoading(false)
@@ -27,12 +46,21 @@ export default function LoadingScreen() {
       .catch(err => {
         setError(err instanceof Error ? err.message : 'Failed to generate questions')
       })
+
+    // Poll for stuck state every 5s
+    const stuckTimer = setInterval(() => {
+      if (Date.now() - lastUpdateRef.current > STUCK_THRESHOLD_MS) {
+        setStuck(true)
+      }
+    }, 5_000)
+
+    return () => clearInterval(stuckTimer)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (error) {
     return (
       <div className="min-h-screen bg-navy flex items-center justify-center px-4">
-        <div className="text-center">
+        <div className="text-center max-w-sm">
           <div className="text-fail text-lg mb-4">{error}</div>
           <button
             onClick={() => navigate('/exam')}
@@ -62,6 +90,42 @@ export default function LoadingScreen() {
           />
         </div>
         <div className="text-mist text-xs mt-2">{progress.percent}%</div>
+
+        {stuck && progress.collected > 0 && (
+          <div className="mt-8 bg-ink border border-warn/30 rounded-xl p-4 text-left space-y-3">
+            <p className="text-warn text-sm font-semibold">Taking longer than usual…</p>
+            <p className="text-mist text-xs">
+              {progress.collected} questions generated so far. You can start now or keep waiting.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={() => navigate('/exam')}
+                className="flex-1 py-2 rounded-lg border border-white/20 text-mist text-xs hover:text-cream transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  // Use whatever has been collected so far
+                  generatedRef.current?.then(questions => {
+                    if (questions.length > 0) {
+                      setQuestions(questions)
+                      setLoading(false)
+                      navigate('/exam/question')
+                    }
+                  }).catch(() => {
+                    // If promise already failed, just go back
+                    navigate('/exam')
+                  })
+                  navigate('/exam/question')
+                }}
+                className="flex-1 py-2 rounded-lg bg-gold text-navy text-xs font-bold hover:bg-amber-400 transition-colors"
+              >
+                Start with {progress.collected} questions
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

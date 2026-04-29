@@ -6,6 +6,8 @@ import { useAuthStore } from '../store/authStore'
 import { DOMAIN_TOPICS, toTopicSlug } from '../utils/domainUtils'
 
 const CHUNK_SIZE = 5
+const CHUNK_RETRIES = 3
+const RETRY_DELAY_MS = 2000
 
 // Domain-specific content to force unique, knowledge-requiring questions
 const getDomainContext = (domain: string): string => {
@@ -74,7 +76,7 @@ const getDomainContext = (domain: string): string => {
   return contexts[domain] ?? 'General CX professional knowledge and best practices'
 }
 
-const buildPrompt = (domain: string, count: number, seenTopics: string[]): string => `
+const buildPrompt = (domain: string, count: number, seenQuestionStems: string[]): string => `
 You are a strict CCXP exam question writer for the CXPA certification.
 
 Generate exactly ${count} multiple-choice questions for domain: "${domain}".
@@ -93,36 +95,26 @@ STRICT RULES — violations will fail the exam:
     TYPE 5 DEFINITION: "Customer Effort Score (CES) differs from NPS primarily because..."
 - Correct answers must require genuine CX knowledge — not common sense
 - Wrong answers must be plausible CX concepts that are simply not the BEST answer
-${seenTopics.length > 0 ? `- Do NOT repeat these topics already covered: ${seenTopics.slice(0, 15).join(', ')}` : ''}
+${seenQuestionStems.length > 0 ? `- Do NOT generate questions similar to these already seen: ${seenQuestionStems.slice(0, 10).join(' | ')}` : ''}
 
 Domain-specific content to draw from for "${domain}":
 ${getDomainContext(domain)}
 
 Respond ONLY with a raw JSON array. No markdown, no preamble, no explanation.
-Format: [{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words"}]
+Format: [{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words","sourceTopic":"topic name"}]
 `
 
-// Reject batches where questions are too similar or answer options repeat
+// Only reject batches with clearly duplicated question openings (first 8 words).
+// Answer option dedup removed — LLMs legitimately reuse short phrases like "Conduct a survey"
+// across unrelated questions, and rejecting on that was silently discarding good batches.
 function validateBatch(batch: Question[]): boolean {
-  // Check for repeated opening phrases (first 6 words)
-  const openings = batch.map(q => q.q.trim().toLowerCase().split(' ').slice(0, 6).join(' '))
-  const openingCounts = new Map<string, number>()
+  const openings = batch.map(q => q.q.trim().toLowerCase().split(' ').slice(0, 8).join(' '))
+  const seen = new Map<string, number>()
   for (const o of openings) {
-    openingCounts.set(o, (openingCounts.get(o) ?? 0) + 1)
-    if ((openingCounts.get(o) ?? 0) > 2) return false
+    const count = (seen.get(o) ?? 0) + 1
+    seen.set(o, count)
+    if (count > 1) return false
   }
-
-  // Check for repeated answer options across questions
-  const allOptions: string[] = []
-  for (const q of batch) {
-    allOptions.push(q.a.trim().toLowerCase(), q.b.trim().toLowerCase(), q.c.trim().toLowerCase(), q.d.trim().toLowerCase())
-  }
-  const optionCounts = new Map<string, number>()
-  for (const opt of allOptions) {
-    optionCounts.set(opt, (optionCounts.get(opt) ?? 0) + 1)
-    if ((optionCounts.get(opt) ?? 0) > 1) return false
-  }
-
   return true
 }
 
@@ -142,7 +134,6 @@ function parseQuestions(raw: unknown, domain: string): Question[] {
       const topicsForDomain = DOMAIN_TOPICS[domain] ?? []
       return arr.map(q => {
         const question = { ...(q as object), id: crypto.randomUUID(), domain } as Question
-        // Ensure sourceTopic is set — LLM sometimes omits it
         if (!question.sourceTopic && topicsForDomain.length > 0) {
           question.sourceTopic = topicsForDomain[0]
           question.sourceTopicSlug = toTopicSlug(topicsForDomain[0])
@@ -191,7 +182,7 @@ const FALLBACKS: Record<string, Question[]> = {
 function getFallback(domain: string, seen: Set<string>): Question | null {
   const pool = FALLBACKS[domain] ?? []
   for (const q of pool) {
-    const key = q.q.trim().toLowerCase()
+    const key = q.q.trim().toLowerCase().substring(0, 60)
     if (!seen.has(key)) {
       seen.add(key)
       return { ...q, id: crypto.randomUUID() }
@@ -219,8 +210,15 @@ export function useQuestionGen() {
     const weights = DOMAIN_WEIGHTS[mode]
     const domains = domain ? [domain] : Object.keys(weights)
 
-    // Total questions needed — progress denominator never changes
-    const totalNeeded = domains.reduce((sum, d) => sum + (domain ? (weights[d] ?? 10) : (weights[d] ?? 0)), 0)
+    const totalNeeded = domains.reduce((sum, d) => {
+      return sum + (domain ? (weights[d] ?? 10) : (weights[d] ?? 0))
+    }, 0)
+
+    console.log('[QuestionGen] mode:', mode, '| domain filter:', domain)
+    console.log('[QuestionGen] weights:', weights)
+    console.log('[QuestionGen] domains:', domains)
+    console.log('[QuestionGen] totalNeeded:', totalNeeded)
+
     let questionsCollected = 0
 
     const report = (currentDomain: string) => {
@@ -235,7 +233,7 @@ export function useQuestionGen() {
       })
     }
 
-    // Shared seen set across ALL domains — prevents cross-domain duplicates
+    // Use first 60 chars as dedup key — avoids over-deduplication from minor LLM phrasing variation
     const seenQuestions = new Set<string>()
     const allQuestions: Question[] = []
 
@@ -244,42 +242,68 @@ export function useQuestionGen() {
     for (const d of domains) {
       const targetCount = domain ? (weights[d] ?? 10) : (weights[d] ?? 0)
       const domainQuestions: Question[] = []
-      let attempts = 0
-      const maxAttempts = Math.ceil(targetCount / CHUNK_SIZE) + 3
+      let outerAttempts = 0
+      const maxOuterAttempts = Math.ceil(targetCount / CHUNK_SIZE) + 4
 
-      while (domainQuestions.length < targetCount && attempts < maxAttempts) {
+      console.log(`[QuestionGen] ${d}: targeting ${targetCount} questions`)
+
+      while (domainQuestions.length < targetCount && outerAttempts < maxOuterAttempts) {
         const needed = targetCount - domainQuestions.length
         const chunkSize = Math.min(needed, CHUNK_SIZE)
 
-        const seenTopics = [...seenQuestions].slice(0, 15)
-        const prompt = buildPrompt(d, chunkSize, seenTopics)
+        // Build seen stems for prompt context (short, not full text)
+        const seenStems = [...seenQuestions].map(k => k.substring(0, 40)).slice(0, 10)
+        const prompt = buildPrompt(d, chunkSize, seenStems)
 
-        try {
-          const raw = await callLLM(
-            { type: 'generate-questions', domain: d, count: chunkSize, extra: prompt },
-            token
-          )
-          const batch = parseQuestions(raw, d)
+        // Retry each chunk up to CHUNK_RETRIES times before skipping
+        let chunkSuccess = false
+        for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+          try {
+            const raw = await callLLM(
+              { type: 'generate-questions', domain: d, count: chunkSize, extra: prompt },
+              token
+            )
+            const batch = parseQuestions(raw, d)
 
-          // Validate batch quality — regenerate if too similar
-          if (batch.length >= 2 && !validateBatch(batch)) {
-            console.warn(`Batch validation failed for ${d} — regenerating`)
-            attempts++
-            report(d)
-            continue
+            console.log(`[QuestionGen] ${d} chunk attempt ${attempt + 1}: got ${batch.length} raw questions`)
+
+            if (batch.length === 0) {
+              console.warn(`[QuestionGen] ${d} chunk attempt ${attempt + 1}: empty batch`)
+              if (attempt < CHUNK_RETRIES - 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+              continue
+            }
+
+            // Validate — only checks for duplicate question openings now
+            if (batch.length >= 2 && !validateBatch(batch)) {
+              console.warn(`[QuestionGen] ${d} chunk attempt ${attempt + 1}: validation failed (duplicate openings) — retrying`)
+              if (attempt < CHUNK_RETRIES - 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+              continue
+            }
+
+            // Deduplicate using first 60 chars of question text
+            const uniqueBatch = batch.filter(q => {
+              const key = q.q.trim().toLowerCase().substring(0, 60)
+              if (seenQuestions.has(key)) return false
+              seenQuestions.add(key)
+              return true
+            })
+
+            console.log(`[QuestionGen] ${d} chunk attempt ${attempt + 1}: ${uniqueBatch.length} unique after dedup`)
+
+            domainQuestions.push(...uniqueBatch)
+            questionsCollected += uniqueBatch.length
+            chunkSuccess = true
+            break
+          } catch (err) {
+            console.warn(`[QuestionGen] ${d} chunk attempt ${attempt + 1} threw:`, err)
+            if (attempt < CHUNK_RETRIES - 1) {
+              await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+            }
           }
+        }
 
-          // Deduplicate against global seen set
-          const uniqueBatch = batch.filter(q => {
-            const key = q.q.trim().toLowerCase()
-            if (seenQuestions.has(key)) return false
-            seenQuestions.add(key)
-            return true
-          })
-
-          domainQuestions.push(...uniqueBatch)
-          questionsCollected += uniqueBatch.length
-        } catch {
+        if (!chunkSuccess) {
+          console.error(`[QuestionGen] ${d}: chunk skipped after ${CHUNK_RETRIES} attempts`)
           const fallback = getFallback(d, seenQuestions)
           if (fallback) {
             domainQuestions.push(fallback)
@@ -287,7 +311,7 @@ export function useQuestionGen() {
           }
         }
 
-        attempts++
+        outerAttempts++
         report(d)
       }
 
@@ -302,22 +326,32 @@ export function useQuestionGen() {
         }
       }
 
+      console.log(`[QuestionGen] ${d}: collected ${domainQuestions.length} of ${targetCount}`)
       allQuestions.push(...domainQuestions.slice(0, targetCount))
     }
 
-    // Final dedup safety net
+    console.log('[QuestionGen] Total before final dedup:', allQuestions.length)
+
+    // Final dedup safety net (same 60-char key)
     const finalSeen = new Set<string>()
     const dedupedQuestions = allQuestions.filter(q => {
-      const key = q.q.trim().toLowerCase()
+      const key = q.q.trim().toLowerCase().substring(0, 60)
       if (finalSeen.has(key)) return false
       finalSeen.add(key)
       return true
     })
 
-    console.log('Total generated:', allQuestions.length)
-    console.log('Unique questions:', dedupedQuestions.length)
+    console.log('[QuestionGen] After final dedup:', dedupedQuestions.length)
 
-    // Signal 100% only after everything is ready
+    // Guard: refuse to start exam if we got less than 80% of what we needed
+    const minimumRequired = Math.max(Math.floor(totalNeeded * 0.8), 1)
+    if (dedupedQuestions.length < minimumRequired) {
+      throw new Error(
+        `Only generated ${dedupedQuestions.length} of ${totalNeeded} questions ` +
+        `(minimum required: ${minimumRequired}). Please check your connection and try again.`
+      )
+    }
+
     onProgress({
       percent: 100,
       collected: dedupedQuestions.length,
