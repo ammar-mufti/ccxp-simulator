@@ -58,16 +58,35 @@ async function verifyJwt(token: string, secret: string): Promise<Record<string, 
   }
 }
 
-function parseJsonFromText(text: string): unknown | null {
-  const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-  const arr = cleaned.match(/\[[\s\S]*\]/)
-  if (arr) { try { return JSON.parse(arr[0]) } catch { /* fall */ } }
-  const obj = cleaned.match(/\{[\s\S]*\}/)
-  if (obj) { try { return JSON.parse(obj[0]) } catch { /* fall */ } }
-  return null
+// Extracts JSON array or object from LLM text that may contain markdown fences or prose
+function extractJson(text: string, shape: 'array' | 'object'): unknown {
+  if (!text || !text.trim()) throw new Error('LLM returned empty text')
+
+  // Strip markdown fences
+  let clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
+
+  // Try direct parse first (model sometimes outputs pure JSON)
+  try { return JSON.parse(clean) } catch { /* continue */ }
+
+  // Extract by expected shape
+  const pattern = shape === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/
+  const match = clean.match(pattern)
+  if (match) {
+    try { return JSON.parse(match[0]) } catch { /* continue */ }
+  }
+
+  // Try from first bracket as last resort
+  const startChar = shape === 'array' ? '[' : '{'
+  const idx = clean.indexOf(startChar)
+  if (idx !== -1) {
+    try { return JSON.parse(clean.slice(idx)) } catch { /* continue */ }
+  }
+
+  throw new Error(`Could not parse JSON from LLM output. Preview: ${text.slice(0, 200)}`)
 }
 
-async function callGroq(prompt: string, apiKey: string, maxTokens = 2048): Promise<string> {
+// Calls Groq. Throws on rate-limit or HTTP error — never swallows errors.
+async function callGroq(prompt: string, apiKey: string, maxTokens: number): Promise<string> {
   const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -78,41 +97,84 @@ async function callGroq(prompt: string, apiKey: string, maxTokens = 2048): Promi
       temperature: 0.4,
     }),
   })
-  if (res.status === 429) throw new Error('RATE_LIMIT')
-  if (!res.ok) throw new Error(`Groq ${res.status}`)
-  const data = await res.json() as { choices: Array<{ message: { content: string } }> }
-  return data.choices?.[0]?.message?.content ?? ''
+
+  if (res.status === 429) {
+    const body = await res.text()
+    throw new Error(`GROQ_RATE_LIMIT: ${body}`)
+  }
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Groq HTTP ${res.status}: ${body}`)
+  }
+
+  const data = await res.json() as {
+    choices?: Array<{ message?: { content?: string } }>
+    error?: { message: string }
+  }
+
+  if (data.error) throw new Error(`Groq API error: ${data.error.message}`)
+
+  const text = data.choices?.[0]?.message?.content ?? ''
+  if (!text.trim()) throw new Error('Groq returned empty content')
+  return text
 }
 
-async function callGemini(prompt: string, apiKey: string): Promise<string> {
+// Calls Gemini. Throws on HTTP error or empty response.
+async function callGemini(prompt: string, apiKey: string, maxTokens: number): Promise<string> {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 2048, temperature: 0.4 },
+        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
       }),
     }
   )
-  if (!res.ok) throw new Error(`Gemini ${res.status}`)
-  const data = await res.json() as { candidates: Array<{ content: { parts: Array<{ text: string }> } }> }
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Gemini HTTP ${res.status}: ${body}`)
+  }
+
+  const data = await res.json() as {
+    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
+    error?: { message: string }
+  }
+
+  if (data.error) throw new Error(`Gemini API error: ${data.error.message}`)
+
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
+  if (!text.trim()) throw new Error('Gemini returned empty content')
+  return text
 }
 
+// Tries Groq first, falls back to Gemini. Throws if both fail — callers decide error handling.
 async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
+  // Groq cap: llama-3.3-70b max_tokens is 32768 but practical limit for JSON is 8192
+  const groqMax = Math.min(maxTokens, 8192)
+  // Gemini cap: gemini-2.0-flash supports up to 8192 output tokens
+  const geminiMax = Math.min(maxTokens, 8192)
+
+  let groqError = ''
   try {
-    return await callGroq(prompt, env.GROQ_API_KEY, maxTokens)
+    return await callGroq(prompt, env.GROQ_API_KEY, groqMax)
   } catch (err) {
-    if (err instanceof Error && err.message === 'RATE_LIMIT') {
-      await new Promise(r => setTimeout(r, 3000))
+    groqError = err instanceof Error ? err.message : String(err)
+    console.error('Groq failed:', groqError)
+    // Brief pause before Gemini if rate limited
+    if (groqError.includes('RATE_LIMIT')) {
+      await new Promise(r => setTimeout(r, 2000))
     }
-    try {
-      return await callGemini(prompt, env.GEMINI_API_KEY)
-    } catch {
-      return ''
-    }
+  }
+
+  try {
+    return await callGemini(prompt, env.GEMINI_API_KEY, geminiMax)
+  } catch (err) {
+    const geminiError = err instanceof Error ? err.message : String(err)
+    console.error('Gemini also failed:', geminiError)
+    throw new Error(`Both LLMs failed. Groq: ${groqError} | Gemini: ${geminiError}`)
   }
 }
 
@@ -143,7 +205,6 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) })
     }
 
-    // GitHub OAuth login
     if (url.pathname === '/auth/github/login') {
       return Response.redirect(
         `https://github.com/login/oauth/authorize?client_id=${env.GITHUB_CLIENT_ID}&scope=read:user`,
@@ -151,7 +212,6 @@ export default {
       )
     }
 
-    // GitHub OAuth callback
     if (url.pathname === '/auth/github/callback') {
       const code = url.searchParams.get('code')
       if (!code) return jsonRes({ error: 'No code' }, 400, origin)
@@ -173,14 +233,13 @@ export default {
       return Response.redirect(`https://ammar-mufti.github.io/ccxp-simulator/login?token=${jwt}`, 302)
     }
 
-    // LLM proxy
     if (url.pathname === '/api/llm' && request.method === 'POST') {
       const authHeader = request.headers.get('Authorization') ?? ''
       const token = authHeader.replace('Bearer ', '')
       const payload = await verifyJwt(token, env.JWT_SECRET)
       if (!payload) return jsonRes({ error: 'Unauthorized' }, 401, origin)
 
-      const body = await request.json() as {
+      let body: {
         type: string
         domain: string
         count?: number
@@ -196,82 +255,108 @@ export default {
         userAnswer?: string
       }
 
+      try {
+        body = await request.json()
+      } catch {
+        return jsonRes({ error: 'Invalid JSON body' }, 400, origin)
+      }
+
       // ── STAGE 1: Domain snapshot ─────────────────────────────────────────
       if (body.type === 'stage1-summary') {
         const prompt = `You are a CCXP exam coach. Give a concise exam-focused summary of domain: "${body.domain}" for someone sitting the exam this Saturday.
 
-Respond ONLY with raw JSON:
+Output ONLY this JSON object — no markdown, no explanation:
 {
-  "tagline": "One sentence describing this domain's purpose",
+  "tagline": "One sentence describing this domain purpose",
   "examWeight": "${DOMAIN_WEIGHTS_MAP[body.domain] ?? ''}",
   "mustKnow": [
-    "5 specific must-know facts — include framework names, model names, percentages where relevant"
+    "Specific fact 1 with framework or model name",
+    "Specific fact 2",
+    "Specific fact 3",
+    "Specific fact 4",
+    "Specific fact 5"
   ],
   "commonMistakes": [
-    "3 specific exam mistakes candidates make in this domain"
+    "Specific mistake 1 candidates make in this domain",
+    "Specific mistake 2",
+    "Specific mistake 3"
   ],
   "connectedDomains": [
-    "Domain name — one sentence on why it connects"
+    "Domain name — one sentence why connected"
   ]
-}
-Raw JSON only. No markdown.`
-        const raw = await llm(prompt, env, 1024)
-        const parsed = parseJsonFromText(raw)
-        if (parsed) return jsonRes({ data: parsed }, 200, origin)
-        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+}`
+
+        try {
+          const raw = await llm(prompt, env, 1024)
+          const data = extractJson(raw, 'object')
+          return jsonRes({ data }, 200, origin)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return jsonRes({ error: msg }, 500, origin)
+        }
       }
 
-      // ── STAGE 2: Key concepts (all topics) ───────────────────────────────
+      // ── STAGE 2: Key concepts ─────────────────────────────────────────────
       if (body.type === 'stage2-concepts') {
         const topics = body.topics ?? DOMAIN_TOPIC_MAP[body.domain] ?? []
-        const prompt = `You are a CCXP exam coach writing structured study material.
+
+        // Split into 2 batches to stay within token limits
+        const half = Math.ceil(topics.length / 2)
+        const batches = [topics.slice(0, half), topics.slice(half)].filter(b => b.length > 0)
+
+        const buildPrompt = (batch: string[]) =>
+          `You are a CCXP exam coach writing structured study material.
 Generate key concepts for domain: "${body.domain}".
-Topics to cover: ${topics.join(', ')}
+Topics: ${batch.join(', ')}
 
-For each topic write structured bullet points — NOT long prose.
-Be specific and exam-focused. Include framework names, model names, and percentages where relevant.
-
-Respond ONLY with raw JSON array:
+Output ONLY a raw JSON array with exactly ${batch.length} objects — no markdown, no explanation:
 [
   {
-    "topic": "exact topic name from the list above",
-    "summary": "One sentence — what this concept is",
+    "topic": "exact topic name from list",
+    "summary": "One sentence what this concept is",
     "bullets": [
-      "Specific key point including any framework or model name",
-      "Practical application in a CX context",
-      "How it connects to other CCXP concepts",
-      "Exam-relevant detail — what the question will test"
+      "Specific key point with framework/model name if relevant",
+      "Practical CX application",
+      "Connection to other CCXP concepts",
+      "What the exam specifically tests here"
     ],
     "examTip": "The specific wrong answer pattern to avoid",
     "keyTerms": [
-      {"term": "exact term", "definition": "precise one sentence"}
+      {"term": "term", "definition": "one sentence"}
     ]
   }
-]
-Generate exactly ${topics.length} objects — one per topic.
-Bullets must be specific — no generic statements.
-keyTerms: minimum 3 per topic.
-Raw JSON array only. No markdown.`
-        const raw = await llm(prompt, env, 6000)
-        const parsed = parseJsonFromText(raw)
-        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
-        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+]`
+
+        try {
+          const results = await Promise.all(
+            batches.map(batch => llm(buildPrompt(batch), env, 4096))
+          )
+          const parsed = results.flatMap(raw => {
+            const arr = extractJson(raw, 'array')
+            return Array.isArray(arr) ? arr : []
+          })
+          if (parsed.length === 0) throw new Error('No topics parsed from batches')
+          return jsonRes({ data: parsed }, 200, origin)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return jsonRes({ error: msg }, 500, origin)
+        }
       }
 
-      // ── STAGE 3: Deep dive on a single topic ─────────────────────────────
+      // ── STAGE 3: Deep dive ────────────────────────────────────────────────
       if (body.type === 'stage3-deepdive') {
         const prompt = `You are a CCXP exam coach. Write a comprehensive deep dive on:
 Topic: "${body.topic}"
 Domain: "${body.domain}"
 
-Respond ONLY with raw JSON:
+Output ONLY this JSON object — no markdown, no explanation:
 {
-  "overview": "3-4 sentence comprehensive explanation of the concept",
+  "overview": "3-4 sentence comprehensive explanation",
   "howItWorks": [
-    "Step or principle 1 — specific and actionable",
-    "Step or principle 2",
-    "Step or principle 3",
-    "Step or principle 4"
+    "Step 1 — specific and actionable",
+    "Step 2",
+    "Step 3",
+    "Step 4"
   ],
   "realWorldExample": {
     "scenario": "Specific company or industry scenario (3-4 sentences)",
@@ -280,36 +365,38 @@ Respond ONLY with raw JSON:
   },
   "examScenario": {
     "question": "An exam-style scenario question about this topic",
-    "wrongAnswer": "The tempting wrong answer and exactly why it looks right",
-    "correctAnswer": "The correct answer and why it is the BEST choice"
+    "wrongAnswer": "The tempting wrong answer and why it looks right",
+    "correctAnswer": "The correct answer and why it is the best choice"
   },
   "frameworks": [
     {
       "name": "Framework or model name",
-      "description": "What it is and when CX professionals use it",
+      "description": "What it is and when to use it",
       "stages": ["stage1", "stage2", "stage3"]
     }
   ],
-  "memoryAid": "A mnemonic, acronym, or memorable shortcut for the exam"
-}
-Raw JSON only. No markdown.`
-        const raw = await llm(prompt, env, 3000)
-        const parsed = parseJsonFromText(raw)
-        if (parsed) return jsonRes({ data: parsed }, 200, origin)
-        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+  "memoryAid": "A mnemonic, acronym, or memorable shortcut"
+}`
+
+        try {
+          const raw = await llm(prompt, env, 3000)
+          const data = extractJson(raw, 'object')
+          return jsonRes({ data }, 200, origin)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return jsonRes({ error: msg }, 500, origin)
+        }
       }
 
       // ── STAGE 4: Practice quiz ────────────────────────────────────────────
       if (body.type === 'stage4-quiz') {
-        const prompt = `Generate 5 practice questions for CCXP domain: "${body.domain}".
-These are for learning — explanations must be educational (2-3 sentences).
-All 4 options must be plausible — no obviously wrong answers.
-Vary question types: scenario, definition, framework, best-practice.
+        const prompt = `Generate exactly 5 practice questions for CCXP domain: "${body.domain}".
+Rules: educational explanations (2-3 sentences), all 4 options plausible, vary types.
 
-Respond ONLY with raw JSON array:
+Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanation:
 [
   {
-    "q": "Question text — specific scenario or concept",
+    "q": "Specific question text",
     "a": "Plausible option A",
     "b": "Plausible option B",
     "c": "Plausible option C",
@@ -317,23 +404,25 @@ Respond ONLY with raw JSON array:
     "correct": "b",
     "explanation": "2-3 sentence educational explanation"
   }
-]
-Raw JSON array only. No markdown.`
-        const raw = await llm(prompt, env, 3000)
-        const parsed = parseJsonFromText(raw)
-        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
-        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+]`
+
+        try {
+          const raw = await llm(prompt, env, 3000)
+          const data = extractJson(raw, 'array')
+          if (!Array.isArray(data) || data.length === 0) throw new Error('Expected non-empty array')
+          return jsonRes({ data }, 200, origin)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return jsonRes({ error: msg }, 500, origin)
+        }
       }
 
       // ── Tutor chat ────────────────────────────────────────────────────────
       if (body.type === 'tutor-chat') {
-        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, connect back to how topics appear on the exam, keep responses under 200 words unless detail is needed, encourage the user.`
+        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, keep responses under 200 words unless detail is needed.`
 
         const messages = (body.messages ?? []).slice(-10)
-        const groqMessages = [
-          { role: 'system', content: systemPrompt },
-          ...messages,
-        ]
+        const groqMessages = [{ role: 'system', content: systemPrompt }, ...messages]
 
         let response = ''
         try {
@@ -342,14 +431,14 @@ Raw JSON array only. No markdown.`
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
             body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
           })
-          if (res.status === 429) { await new Promise(r => setTimeout(r, 3000)); throw new Error('RATE_LIMIT') }
+          if (res.status === 429) { await new Promise(r => setTimeout(r, 2000)); throw new Error('rate limited') }
           if (res.ok) {
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }
             response = data.choices?.[0]?.message?.content ?? ''
           }
         } catch {
           try {
-            response = await callGemini(systemPrompt + '\n\nUser: ' + (messages[messages.length - 1]?.content ?? ''), env.GEMINI_API_KEY)
+            response = await callGemini(systemPrompt + '\n\nUser: ' + (messages[messages.length - 1]?.content ?? ''), env.GEMINI_API_KEY, 1024)
           } catch {
             response = "I'm having trouble connecting right now. Please try again in a moment."
           }
@@ -364,74 +453,65 @@ Raw JSON array only. No markdown.`
         const userText = optLabels[body.userAnswer ?? ''] ?? ''
         const wasCorrect = body.userAnswer === body.correct
 
-        const prompt = `A CCXP exam candidate just answered this question.
+        const prompt = `A CCXP candidate answered this question.
 
 Question: ${body.question}
-Option A: ${body.a}
-Option B: ${body.b}
-Option C: ${body.c}
-Option D: ${body.d}
-Correct answer: (${body.correct?.toUpperCase()}) ${correctText}
-Candidate selected: (${body.userAnswer?.toUpperCase()}) ${userText}
-${wasCorrect ? 'They got it RIGHT.' : 'They got it WRONG.'}
+A: ${body.a}  B: ${body.b}  C: ${body.c}  D: ${body.d}
+Correct: (${body.correct?.toUpperCase()}) ${correctText}
+They chose: (${body.userAnswer?.toUpperCase()}) ${userText}
+${wasCorrect ? 'CORRECT.' : 'WRONG.'}
 
-Explain in exactly 3 parts using this format:
-**WHY (${body.correct?.toUpperCase()}) is correct:**
-[1-2 sentences, exam-focused]
+Explain in 3 parts:
+**WHY (${body.correct?.toUpperCase()}) is correct:** [1-2 sentences]
+**Why the others are wrong:** ${['a','b','c','d'].filter(o => o !== body.correct).map(o => `(${o.toUpperCase()}) one sentence`).join(', ')}
+**💡 Exam Tip:** [one memory tip]
 
-**Why the others are wrong:**
-${['a','b','c','d'].filter(o => o !== body.correct).map(o => `(${o.toUpperCase()}) [one sentence why wrong]`).join('\n')}
+Under 150 words. Bold key CX terms. Domain: ${body.domain}`
 
-**💡 Exam Tip:**
-[One sentence memory tip for the exam]
-
-Keep total response under 150 words. Bold key CX terms. Domain: ${body.domain}`
-
-        const raw = await llm(prompt, env)
-        return jsonRes({ explanation: raw }, 200, origin)
+        try {
+          const raw = await llm(prompt, env, 512)
+          return jsonRes({ explanation: raw }, 200, origin)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          return jsonRes({ explanation: `Could not generate explanation: ${msg}` }, 200, origin)
+        }
       }
 
       // ── Generate questions (exam) ─────────────────────────────────────────
       if (body.type === 'generate-questions') {
-        // Frontend sends full crafted prompt in extra — use it directly
-        if (body.extra && body.extra.length > 100) {
-          const raw = await llm(body.extra, env, 4096)
-          const parsed = parseJsonFromText(raw)
+        const prompt = body.extra && body.extra.length > 100
+          ? body.extra
+          : `Generate ${body.count ?? 5} CCXP exam questions for domain: "${body.domain}".
+Output ONLY a raw JSON array:
+[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words","sourceTopic":"topic","sourceTopicSlug":"kebab-case"}]`
+
+        try {
+          const raw = await llm(prompt, env, 4096)
+          const parsed = extractJson(raw, 'array')
           if (Array.isArray(parsed) && parsed.length > 0) return jsonRes(parsed, 200, origin)
-          return jsonRes({ content: raw }, 200, origin)
+          throw new Error('Empty array returned')
+        } catch {
+          return jsonRes({ content: '' }, 200, origin)
         }
-        // Fallback
-        const topics = DOMAIN_TOPIC_MAP[body.domain] ?? []
-        const prompt = `You are a CCXP exam question writer. Generate exactly ${body.count ?? 5} multiple-choice questions for domain: "${body.domain}".
-RULES:
-- Realistic CCXP difficulty (CXPA standard)
-- All 4 options must be plausible — no obviously wrong answers
-- Vary types: scenario, definition, best-practice, framework
-- Each question should test a specific topic from: ${topics.join(', ')}
-Output ONLY raw JSON array:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words","sourceTopic":"topic name","sourceTopicSlug":"kebab-case"}]`
-        const raw = await llm(prompt, env, 4096)
-        const parsed = parseJsonFromText(raw)
-        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes(parsed, 200, origin)
-        return jsonRes({ content: raw }, 200, origin)
       }
 
       // ── Study plan ────────────────────────────────────────────────────────
       if (body.type === 'study-plan') {
-        const prompt = `You are a CCXP exam coach. A student just finished a practice exam.
-Their weakest domains are: ${body.domain}.
-Generate 3 specific study tips for each domain.
+        const prompt = `CCXP study tips for weakest domains: ${body.domain}.
+Generate 3 tips per domain.
+Output ONLY raw JSON array:
+[{"domain":"...","tips":["tip1","tip2","tip3"]}]`
 
-Respond ONLY with raw JSON array:
-[{"domain":"...","tips":["tip1","tip2","tip3"]}]
-No markdown. Raw JSON only.`
-        const raw = await llm(prompt, env)
-        const parsed = parseJsonFromText(raw)
-        if (parsed) return jsonRes(parsed, 200, origin)
-        return jsonRes({ content: raw }, 200, origin)
+        try {
+          const raw = await llm(prompt, env, 1024)
+          const parsed = extractJson(raw, 'array')
+          return jsonRes(parsed, 200, origin)
+        } catch {
+          return jsonRes([], 200, origin)
+        }
       }
 
-      // ── Legacy generate-content (keep for backward compat) ────────────────
+      // ── Legacy generate-content ───────────────────────────────────────────
       if (body.type === 'generate-content') {
         const extra = body.extra ?? ''
         const maxTok = extra === 'topics' ? 4000 : 2048
@@ -441,22 +521,27 @@ No markdown. Raw JSON only.`
         } else if (extra === 'topics') {
           const topics = DOMAIN_TOPIC_MAP[body.domain] ?? []
           prompt = `Generate study content for ${topics.length} topics in domain: "${body.domain}". Topics: ${topics.join(', ')}
-Respond ONLY with raw JSON array:
+Output ONLY raw JSON array:
 [{"topic":"...","explanation":"150 words","example":"2-3 sentences","examTrap":"one sentence","keyTerms":[{"term":"...","definition":"..."}]}]`
         } else if (extra === 'flashcards') {
           prompt = `Generate 10 flashcards for CCXP domain: "${body.domain}".
-Respond ONLY with raw JSON array:
+Output ONLY raw JSON array:
 [{"front":"max 20 words","back":"max 40 words","why":"one sentence"}]`
         } else if (extra === 'quiz') {
           prompt = `Generate 5 practice questions for CCXP domain: "${body.domain}".
-Respond ONLY with raw JSON array:
+Output ONLY raw JSON array:
 [{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"2-3 sentences"}]`
         }
-        const raw = await llm(prompt, env, maxTok)
-        if (extra === 'overview') return jsonRes({ content: raw }, 200, origin)
-        const parsed = parseJsonFromText(raw)
-        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
-        return jsonRes({ content: raw }, 200, origin)
+
+        try {
+          const raw = await llm(prompt, env, maxTok)
+          if (extra === 'overview') return jsonRes({ content: raw }, 200, origin)
+          const parsed = extractJson(raw, 'array')
+          if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
+          return jsonRes({ content: raw }, 200, origin)
+        } catch {
+          return jsonRes({ content: '' }, 200, origin)
+        }
       }
 
       return jsonRes({ error: 'Unknown request type' }, 400, origin)
