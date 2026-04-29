@@ -1,4 +1,6 @@
 import { create } from 'zustand'
+import type { WrongQuestion } from '../types/history'
+import { toTopicSlug } from '../utils/domainUtils'
 
 export interface Question {
   id: string
@@ -10,6 +12,8 @@ export interface Question {
   correct: string
   explanation: string
   domain: string
+  sourceTopic?: string
+  sourceTopicSlug?: string
 }
 
 export type ExamMode = 'full' | 'mini' | 'domain'
@@ -34,9 +38,10 @@ interface ExamState {
   setLoading: (loading: boolean, message?: string) => void
   setError: (error: string | null) => void
   setExplanation: (id: string, text: string) => void
+  buildWrongQuestions: () => WrongQuestion[]
 }
 
-export const useExamStore = create<ExamState>((set) => ({
+export const useExamStore = create<ExamState>((set, get) => ({
   mode: null,
   selectedDomain: null,
   questions: [],
@@ -53,7 +58,6 @@ export const useExamStore = create<ExamState>((set) => ({
   },
 
   setQuestions(rawQuestions) {
-    // Final dedup safety net before exam starts — never blocks exam
     const seen = new Set<string>()
     const questions = rawQuestions.filter(q => {
       const key = q.q.trim().toLowerCase()
@@ -92,6 +96,27 @@ export const useExamStore = create<ExamState>((set) => ({
 
   setError(error) {
     set({ error })
+  },
+
+  buildWrongQuestions(): WrongQuestion[] {
+    const { questions, answers, explanations } = get()
+    return questions
+      .filter(q => answers[q.id] && answers[q.id] !== q.correct)
+      .map(q => {
+        const userAns = answers[q.id]
+        return {
+          id: q.id,
+          questionText: q.q,
+          domain: q.domain,
+          sourceTopic: q.sourceTopic ?? q.domain,
+          sourceTopicSlug: q.sourceTopicSlug ?? toTopicSlug(q.sourceTopic ?? q.domain),
+          userAnswer: userAns,
+          userAnswerText: q[userAns as 'a' | 'b' | 'c' | 'd'] ?? '',
+          correctAnswer: q.correct,
+          correctAnswerText: q[q.correct as 'a' | 'b' | 'c' | 'd'] ?? '',
+          explanation: explanations[q.id] ?? q.explanation ?? '',
+        }
+      })
   },
 }))
 

@@ -40,7 +40,8 @@ export default function App() {
       <OfflineBanner />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/learn/*" element={<ProtectedRoute><LearnPage /></ProtectedRoute>} />
+        <Route path="/learn" element={<ProtectedRoute><LearnPage /></ProtectedRoute>} />
+        <Route path="/learn/:domainSlug" element={<ProtectedRoute><LearnPage /></ProtectedRoute>} />
         <Route path="/exam/*" element={<ProtectedRoute><ExamPage /></ProtectedRoute>} />
         <Route path="/results" element={<ProtectedRoute><ResultsPage /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/learn" replace />} />

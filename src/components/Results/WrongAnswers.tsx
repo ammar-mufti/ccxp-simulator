@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { Question } from '../../store/examStore'
+import { toDomainSlug } from '../../utils/domainUtils'
 
 interface Props {
   questions: Question[]
@@ -10,6 +12,7 @@ const OPTS = ['a', 'b', 'c', 'd'] as const
 
 export default function WrongAnswers({ questions, answers }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null)
+  const navigate = useNavigate()
   const wrong = questions.filter(q => answers[q.id] !== q.correct)
 
   if (wrong.length === 0) {
@@ -19,6 +22,15 @@ export default function WrongAnswers({ questions, answers }: Props) {
         <p className="text-pass font-semibold">Perfect score on reviewed questions!</p>
       </div>
     )
+  }
+
+  function handleStudy(q: Question) {
+    sessionStorage.setItem('ccxp_navigate_to_topic', JSON.stringify({
+      sourceTopic: q.sourceTopic ?? q.domain,
+      sourceTopicSlug: q.sourceTopicSlug ?? '',
+      domain: q.domain,
+    }))
+    navigate(`/learn/${toDomainSlug(q.domain)}`)
   }
 
   return (
@@ -35,7 +47,10 @@ export default function WrongAnswers({ questions, answers }: Props) {
                 onClick={() => setExpanded(isOpen ? null : q.id)}
               >
                 <span className="text-fail text-sm font-bold flex-shrink-0">#{i + 1}</span>
-                <p className="text-mist text-sm flex-1 leading-relaxed">{q.q}</p>
+                <div className="flex-1 min-w-0">
+                  <p className="text-mist text-sm leading-relaxed">{q.q}</p>
+                  <p className="text-mist/50 text-xs mt-1">{q.domain}{q.sourceTopic ? ` · ${q.sourceTopic}` : ''}</p>
+                </div>
                 <span className="text-mist text-xs flex-shrink-0">{isOpen ? '▲' : '▼'}</span>
               </button>
 
@@ -56,10 +71,20 @@ export default function WrongAnswers({ questions, answers }: Props) {
                       </div>
                     )
                   })}
-                  <div className="bg-gold/10 rounded-lg px-3 py-2 mt-2">
-                    <span className="text-gold text-xs font-bold">Explanation: </span>
-                    <span className="text-cream text-xs">{q.explanation}</span>
-                  </div>
+
+                  {q.explanation && (
+                    <div className="bg-gold/10 rounded-lg px-3 py-2 mt-2">
+                      <span className="text-gold text-xs font-bold">Explanation: </span>
+                      <span className="text-cream text-xs">{q.explanation}</span>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => handleStudy(q)}
+                    className="w-full mt-2 py-2 rounded-lg border border-gold/30 text-gold text-sm hover:bg-gold/10 transition-colors flex items-center justify-center gap-2"
+                  >
+                    📚 Study "{q.sourceTopic ?? q.domain}" in {q.domain} →
+                  </button>
                 </div>
               )}
             </div>

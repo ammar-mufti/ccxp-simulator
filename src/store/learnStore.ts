@@ -40,6 +40,7 @@ interface LearnState {
   markFlashcardKnown: (domain: string, index: number) => void
   setQuizScore: (domain: string, score: number) => void
   getDomainProgress: (domain: string) => number
+  resetProgress: () => void
 }
 
 function loadProgress(): Record<string, DomainProgress> {
@@ -100,6 +101,11 @@ export const useLearnStore = create<LearnState>((set, get) => ({
       saveProgress(p)
       return { progress: p }
     })
+  },
+
+  resetProgress() {
+    localStorage.removeItem('ccxp_learn_progress')
+    set({ progress: {}, activeTab: {} })
   },
 
   getDomainProgress(domain) {

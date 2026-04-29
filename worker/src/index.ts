@@ -14,6 +14,7 @@ function corsHeaders(origin: string): Record<string, string> {
     'Access-Control-Allow-Origin': allowed,
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Max-Age': '86400',
   }
 }
 
@@ -57,77 +58,13 @@ async function verifyJwt(token: string, secret: string): Promise<Record<string, 
   }
 }
 
-function extractJson(text: string): string {
+function parseJsonFromText(text: string): unknown | null {
   const cleaned = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
   const arr = cleaned.match(/\[[\s\S]*\]/)
-  if (arr) return arr[0]
+  if (arr) { try { return JSON.parse(arr[0]) } catch { /* fall */ } }
   const obj = cleaned.match(/\{[\s\S]*\}/)
-  if (obj) return obj[0]
-  return cleaned
-}
-
-function buildPrompt(type: string, domain: string, count?: number, extra?: string): string {
-  if (type === 'generate-questions') {
-    // Frontend sends the full crafted prompt in extra — use it directly
-    if (extra && extra.length > 100) return extra
-    // Fallback basic prompt (should rarely be reached)
-    return `You are a CCXP exam question writer. Generate exactly ${count ?? 5} multiple-choice questions for domain: "${domain}".
-STRICT: Every question must be unique, domain-specific, and require genuine CX knowledge.
-NEVER use generic stems. All 4 answer options must be plausible CX concepts.
-Output ONLY a raw JSON array:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words"}]`
-  }
-
-  if (type === 'generate-content') {
-    if (extra === 'overview') {
-      return `You are a CCXP exam coach. Write a study overview for domain: "${domain}".
-Cover: what it covers, why it matters, connections to other domains, what to expect on the exam. Max 220 words. Plain paragraphs only. Plain text.`
-    }
-    if (extra === 'topics') {
-      const topicMap: Record<string, string[]> = {
-        'CX Strategy': ['CX Vision & Mission', 'Business Case for CX', 'CX Maturity Models', 'CX Governance & Ownership', 'CX Roadmap & Prioritization', 'Aligning CX to Corporate Strategy'],
-        'Customer-Centric Culture': ['Culture Change Management', 'Leadership Buy-in & Sponsorship', 'Employee Engagement in CX', 'CX Champions Network', 'Embedding CX Behaviors'],
-        'Voice of Customer': ['VoC Program Design', 'Listening Post Strategy', 'Quantitative vs Qualitative Research', 'Customer Journey Analytics', 'Insight Generation & Storytelling', 'Closing the Feedback Loop'],
-        'Experience Design': ['Customer Journey Mapping', 'Service Design Principles', 'Design Thinking Process', 'Moments of Truth', 'Prototyping & Testing', 'Innovation in CX'],
-        'Metrics & Measurement': ['NPS CSAT CES Explained', 'Linking CX to Business Outcomes', 'Building a CX Dashboard', 'Statistical Concepts for CX', 'ROI Calculation Methods'],
-        'Organizational Adoption': ['Change Management for CX', 'Cross-functional Alignment', 'CX Roles & Responsibilities', 'Governance Structures', 'Sustaining CX Momentum'],
-      }
-      const topics = topicMap[domain] ?? []
-      return `You are a CCXP exam coach. Generate study content for ${topics.length} topics in domain: "${domain}". Topics: ${topics.join(', ')}
-
-Respond ONLY with raw JSON array:
-[{"topic":"Topic Name","explanation":"150-word explanation","example":"Real-world example, 2-3 sentences","examTrap":"Common mistake on exam questions about this topic","keyTerms":[{"term":"...","definition":"one sentence"}]}]
-No markdown, no preamble. Raw JSON array only.`
-    }
-    if (extra === 'flashcards') {
-      return `Generate 10 flashcards for CCXP domain: "${domain}".
-Mix: 4 key terms, 3 scenario-based, 3 framework recall.
-
-Respond ONLY with raw JSON array:
-[{"front":"max 20 words","back":"max 40 words","why":"one sentence"}]
-No markdown. Raw JSON only.`
-    }
-    if (extra === 'quiz') {
-      return `Generate 5 practice questions for CCXP domain: "${domain}".
-Explanations should be educational (2-3 sentences).
-
-Respond ONLY with raw JSON array:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"2-3 sentence educational explanation"}]
-No markdown. Raw JSON only.`
-    }
-  }
-
-  if (type === 'study-plan') {
-    return `You are a CCXP exam coach. A student just finished a practice exam.
-Their weakest domains are: ${domain}.
-Generate 3 specific study tips for each domain.
-
-Respond ONLY with raw JSON array:
-[{"domain":"...","tips":["tip1","tip2","tip3"]}]
-No markdown. Raw JSON only.`
-  }
-
-  return `Answer this CCXP question about ${domain}.`
+  if (obj) { try { return JSON.parse(obj[0]) } catch { /* fall */ } }
+  return null
 }
 
 async function callGroq(prompt: string, apiKey: string, maxTokens = 2048): Promise<string> {
@@ -179,16 +116,31 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
   }
 }
 
+const DOMAIN_TOPIC_MAP: Record<string, string[]> = {
+  'CX Strategy': ['CX Vision & Mission', 'Business Case for CX', 'CX Maturity Models', 'CX Governance & Ownership', 'CX Roadmap & Prioritization', 'Aligning CX to Corporate Strategy'],
+  'Customer-Centric Culture': ['Culture Change Management', 'Leadership Buy-in & Sponsorship', 'Employee Engagement in CX', 'CX Champions Network', 'Embedding CX Behaviors'],
+  'Voice of Customer': ['VoC Program Design', 'Listening Post Strategy', 'Quantitative vs Qualitative Research', 'Customer Journey Analytics', 'Insight Generation & Storytelling', 'Closing the Feedback Loop'],
+  'Experience Design': ['Customer Journey Mapping', 'Service Design Principles', 'Design Thinking Process', 'Moments of Truth', 'Prototyping & Testing', 'Innovation in CX'],
+  'Metrics & Measurement': ['NPS CSAT CES Explained', 'Linking CX to Business Outcomes', 'Building a CX Dashboard', 'Statistical Concepts for CX', 'ROI Calculation Methods'],
+  'Organizational Adoption': ['Change Management for CX', 'Cross-functional Alignment', 'CX Roles & Responsibilities', 'Governance Structures', 'Sustaining CX Momentum'],
+}
+
+const DOMAIN_WEIGHTS_MAP: Record<string, string> = {
+  'CX Strategy': '20 questions — 20% of exam',
+  'Customer-Centric Culture': '17 questions — 17% of exam',
+  'Voice of Customer': '20 questions — 20% of exam',
+  'Experience Design': '18 questions — 18% of exam',
+  'Metrics & Measurement': '15 questions — 15% of exam',
+  'Organizational Adoption': '10 questions — 10% of exam',
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url)
     const origin = request.headers.get('Origin') ?? ''
 
     if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: { ...corsHeaders(origin), 'Access-Control-Max-Age': '86400' },
-      })
+      return new Response(null, { status: 204, headers: corsHeaders(origin) })
     }
 
     // GitHub OAuth login
@@ -233,23 +185,149 @@ export default {
         domain: string
         count?: number
         extra?: string
-        // tutor-chat
+        topics?: string[]
+        topic?: string
         messages?: Array<{ role: string; content: string }>
         systemPrompt?: string
         pageContext?: string
-        // explain-question
         question?: string
-        a?: string
-        b?: string
-        c?: string
-        d?: string
+        a?: string; b?: string; c?: string; d?: string
         correct?: string
         userAnswer?: string
       }
 
-      // ── Tutor chat ──────────────────────────────────────────────────────
+      // ── STAGE 1: Domain snapshot ─────────────────────────────────────────
+      if (body.type === 'stage1-summary') {
+        const prompt = `You are a CCXP exam coach. Give a concise exam-focused summary of domain: "${body.domain}" for someone sitting the exam this Saturday.
+
+Respond ONLY with raw JSON:
+{
+  "tagline": "One sentence describing this domain's purpose",
+  "examWeight": "${DOMAIN_WEIGHTS_MAP[body.domain] ?? ''}",
+  "mustKnow": [
+    "5 specific must-know facts — include framework names, model names, percentages where relevant"
+  ],
+  "commonMistakes": [
+    "3 specific exam mistakes candidates make in this domain"
+  ],
+  "connectedDomains": [
+    "Domain name — one sentence on why it connects"
+  ]
+}
+Raw JSON only. No markdown.`
+        const raw = await llm(prompt, env, 1024)
+        const parsed = parseJsonFromText(raw)
+        if (parsed) return jsonRes({ data: parsed }, 200, origin)
+        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+      }
+
+      // ── STAGE 2: Key concepts (all topics) ───────────────────────────────
+      if (body.type === 'stage2-concepts') {
+        const topics = body.topics ?? DOMAIN_TOPIC_MAP[body.domain] ?? []
+        const prompt = `You are a CCXP exam coach writing structured study material.
+Generate key concepts for domain: "${body.domain}".
+Topics to cover: ${topics.join(', ')}
+
+For each topic write structured bullet points — NOT long prose.
+Be specific and exam-focused. Include framework names, model names, and percentages where relevant.
+
+Respond ONLY with raw JSON array:
+[
+  {
+    "topic": "exact topic name from the list above",
+    "summary": "One sentence — what this concept is",
+    "bullets": [
+      "Specific key point including any framework or model name",
+      "Practical application in a CX context",
+      "How it connects to other CCXP concepts",
+      "Exam-relevant detail — what the question will test"
+    ],
+    "examTip": "The specific wrong answer pattern to avoid",
+    "keyTerms": [
+      {"term": "exact term", "definition": "precise one sentence"}
+    ]
+  }
+]
+Generate exactly ${topics.length} objects — one per topic.
+Bullets must be specific — no generic statements.
+keyTerms: minimum 3 per topic.
+Raw JSON array only. No markdown.`
+        const raw = await llm(prompt, env, 6000)
+        const parsed = parseJsonFromText(raw)
+        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
+        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+      }
+
+      // ── STAGE 3: Deep dive on a single topic ─────────────────────────────
+      if (body.type === 'stage3-deepdive') {
+        const prompt = `You are a CCXP exam coach. Write a comprehensive deep dive on:
+Topic: "${body.topic}"
+Domain: "${body.domain}"
+
+Respond ONLY with raw JSON:
+{
+  "overview": "3-4 sentence comprehensive explanation of the concept",
+  "howItWorks": [
+    "Step or principle 1 — specific and actionable",
+    "Step or principle 2",
+    "Step or principle 3",
+    "Step or principle 4"
+  ],
+  "realWorldExample": {
+    "scenario": "Specific company or industry scenario (3-4 sentences)",
+    "application": "How this topic applies in that scenario",
+    "outcome": "What good CX looks like as a result"
+  },
+  "examScenario": {
+    "question": "An exam-style scenario question about this topic",
+    "wrongAnswer": "The tempting wrong answer and exactly why it looks right",
+    "correctAnswer": "The correct answer and why it is the BEST choice"
+  },
+  "frameworks": [
+    {
+      "name": "Framework or model name",
+      "description": "What it is and when CX professionals use it",
+      "stages": ["stage1", "stage2", "stage3"]
+    }
+  ],
+  "memoryAid": "A mnemonic, acronym, or memorable shortcut for the exam"
+}
+Raw JSON only. No markdown.`
+        const raw = await llm(prompt, env, 3000)
+        const parsed = parseJsonFromText(raw)
+        if (parsed) return jsonRes({ data: parsed }, 200, origin)
+        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+      }
+
+      // ── STAGE 4: Practice quiz ────────────────────────────────────────────
+      if (body.type === 'stage4-quiz') {
+        const prompt = `Generate 5 practice questions for CCXP domain: "${body.domain}".
+These are for learning — explanations must be educational (2-3 sentences).
+All 4 options must be plausible — no obviously wrong answers.
+Vary question types: scenario, definition, framework, best-practice.
+
+Respond ONLY with raw JSON array:
+[
+  {
+    "q": "Question text — specific scenario or concept",
+    "a": "Plausible option A",
+    "b": "Plausible option B",
+    "c": "Plausible option C",
+    "d": "Plausible option D",
+    "correct": "b",
+    "explanation": "2-3 sentence educational explanation"
+  }
+]
+Raw JSON array only. No markdown.`
+        const raw = await llm(prompt, env, 3000)
+        const parsed = parseJsonFromText(raw)
+        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
+        return jsonRes({ error: 'Parse failed', raw }, 500, origin)
+      }
+
+      // ── Tutor chat ────────────────────────────────────────────────────────
       if (body.type === 'tutor-chat') {
-        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, connect back to how topics appear on the exam, keep responses under 200 words unless detail is needed, encourage the user — they are days from their exam.`
+        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, connect back to how topics appear on the exam, keep responses under 200 words unless detail is needed, encourage the user.`
 
         const messages = (body.messages ?? []).slice(-10)
         const groqMessages = [
@@ -264,10 +342,7 @@ export default {
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
             body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
           })
-          if (res.status === 429) {
-            await new Promise(r => setTimeout(r, 3000))
-            throw new Error('RATE_LIMIT')
-          }
+          if (res.status === 429) { await new Promise(r => setTimeout(r, 3000)); throw new Error('RATE_LIMIT') }
           if (res.ok) {
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }
             response = data.choices?.[0]?.message?.content ?? ''
@@ -316,54 +391,72 @@ Keep total response under 150 words. Bold key CX terms. Domain: ${body.domain}`
         return jsonRes({ explanation: raw }, 200, origin)
       }
 
-      // ── Generate content (overview / topics / flashcards / quiz) ─────────
-      if (body.type === 'generate-content') {
-        const extra = body.extra ?? ''
-        const maxTok = extra === 'topics' ? 4000 : 2048
-        const prompt = buildPrompt('generate-content', body.domain, undefined, extra)
-        const raw = await llm(prompt, env, maxTok)
-
-        if (extra === 'overview') {
-          // Return plain text wrapped in { content }
-          return jsonRes({ content: raw || `${body.domain} is a core CCXP domain.` }, 200, origin)
-        }
-
-        // topics / flashcards / quiz — parse JSON array
-        try {
-          const cleaned = raw.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-          const match = cleaned.match(/\[[\s\S]*\]/)
-          if (!match) throw new Error('No JSON array found')
-          const parsed = JSON.parse(match[0])
-          if (!Array.isArray(parsed) || parsed.length === 0) throw new Error('Empty array')
-          return jsonRes({ data: parsed }, 200, origin)
-        } catch (parseErr) {
-          // Return the raw text so the frontend can attempt client-side parsing or use fallback
-          return jsonRes({ content: raw, parseError: String(parseErr) }, 200, origin)
-        }
-      }
-
-      // ── Generate questions ────────────────────────────────────────────────
+      // ── Generate questions (exam) ─────────────────────────────────────────
       if (body.type === 'generate-questions') {
-        const prompt = buildPrompt('generate-questions', body.domain, body.count, body.extra)
-        const raw = await llm(prompt, env)
-        try {
-          const parsed = JSON.parse(extractJson(raw))
-          return jsonRes(parsed, 200, origin)
-        } catch {
+        // Frontend sends full crafted prompt in extra — use it directly
+        if (body.extra && body.extra.length > 100) {
+          const raw = await llm(body.extra, env, 4096)
+          const parsed = parseJsonFromText(raw)
+          if (Array.isArray(parsed) && parsed.length > 0) return jsonRes(parsed, 200, origin)
           return jsonRes({ content: raw }, 200, origin)
         }
+        // Fallback
+        const topics = DOMAIN_TOPIC_MAP[body.domain] ?? []
+        const prompt = `You are a CCXP exam question writer. Generate exactly ${body.count ?? 5} multiple-choice questions for domain: "${body.domain}".
+RULES:
+- Realistic CCXP difficulty (CXPA standard)
+- All 4 options must be plausible — no obviously wrong answers
+- Vary types: scenario, definition, best-practice, framework
+- Each question should test a specific topic from: ${topics.join(', ')}
+Output ONLY raw JSON array:
+[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words","sourceTopic":"topic name","sourceTopicSlug":"kebab-case"}]`
+        const raw = await llm(prompt, env, 4096)
+        const parsed = parseJsonFromText(raw)
+        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes(parsed, 200, origin)
+        return jsonRes({ content: raw }, 200, origin)
       }
 
       // ── Study plan ────────────────────────────────────────────────────────
       if (body.type === 'study-plan') {
-        const prompt = buildPrompt('study-plan', body.domain, undefined, body.extra)
+        const prompt = `You are a CCXP exam coach. A student just finished a practice exam.
+Their weakest domains are: ${body.domain}.
+Generate 3 specific study tips for each domain.
+
+Respond ONLY with raw JSON array:
+[{"domain":"...","tips":["tip1","tip2","tip3"]}]
+No markdown. Raw JSON only.`
         const raw = await llm(prompt, env)
-        try {
-          const parsed = JSON.parse(extractJson(raw))
-          return jsonRes(parsed, 200, origin)
-        } catch {
-          return jsonRes({ content: raw }, 200, origin)
+        const parsed = parseJsonFromText(raw)
+        if (parsed) return jsonRes(parsed, 200, origin)
+        return jsonRes({ content: raw }, 200, origin)
+      }
+
+      // ── Legacy generate-content (keep for backward compat) ────────────────
+      if (body.type === 'generate-content') {
+        const extra = body.extra ?? ''
+        const maxTok = extra === 'topics' ? 4000 : 2048
+        let prompt = ''
+        if (extra === 'overview') {
+          prompt = `Write a study overview for CCXP domain: "${body.domain}". Max 220 words. Plain text.`
+        } else if (extra === 'topics') {
+          const topics = DOMAIN_TOPIC_MAP[body.domain] ?? []
+          prompt = `Generate study content for ${topics.length} topics in domain: "${body.domain}". Topics: ${topics.join(', ')}
+Respond ONLY with raw JSON array:
+[{"topic":"...","explanation":"150 words","example":"2-3 sentences","examTrap":"one sentence","keyTerms":[{"term":"...","definition":"..."}]}]`
+        } else if (extra === 'flashcards') {
+          prompt = `Generate 10 flashcards for CCXP domain: "${body.domain}".
+Respond ONLY with raw JSON array:
+[{"front":"max 20 words","back":"max 40 words","why":"one sentence"}]`
+        } else if (extra === 'quiz') {
+          prompt = `Generate 5 practice questions for CCXP domain: "${body.domain}".
+Respond ONLY with raw JSON array:
+[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"2-3 sentences"}]`
         }
+        const raw = await llm(prompt, env, maxTok)
+        if (extra === 'overview') return jsonRes({ content: raw }, 200, origin)
+        const parsed = parseJsonFromText(raw)
+        if (Array.isArray(parsed) && parsed.length > 0) return jsonRes({ data: parsed }, 200, origin)
+        return jsonRes({ content: raw }, 200, origin)
       }
 
       return jsonRes({ error: 'Unknown request type' }, 400, origin)

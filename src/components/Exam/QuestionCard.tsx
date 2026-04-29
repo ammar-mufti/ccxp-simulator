@@ -1,7 +1,9 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { Question } from '../../store/examStore'
 import { useExamStore } from '../../store/examStore'
 import { useAuthStore } from '../../store/authStore'
+import { toDomainSlug } from '../../utils/domainUtils'
 
 const OPTION_LABELS = ['a', 'b', 'c', 'd'] as const
 const WORKER_URL = import.meta.env.VITE_WORKER_URL
@@ -25,9 +27,11 @@ function renderMarkdown(text: string) {
 export default function QuestionCard({ question, selectedAnswer, onAnswer, questionNumber, totalQuestions }: Props) {
   const { explanations, setExplanation } = useExamStore()
   const token = useAuthStore(s => s.token) ?? ''
+  const navigate = useNavigate()
   const [explaining, setExplaining] = useState(false)
 
   const explanation = explanations[question.id]
+  const isWrong = selectedAnswer && selectedAnswer !== question.correct
 
   async function fetchExplanation() {
     if (explanation || explaining) return
@@ -40,10 +44,7 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
           type: 'explain-question',
           domain: question.domain,
           question: question.q,
-          a: question.a,
-          b: question.b,
-          c: question.c,
-          d: question.d,
+          a: question.a, b: question.b, c: question.c, d: question.d,
           correct: question.correct,
           userAnswer: selectedAnswer,
         }),
@@ -56,6 +57,16 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
     } finally {
       setExplaining(false)
     }
+  }
+
+  function handleStudyTopic() {
+    sessionStorage.setItem('ccxp_navigate_to_topic', JSON.stringify({
+      sourceTopic: question.sourceTopic ?? question.domain,
+      sourceTopicSlug: question.sourceTopicSlug ?? '',
+      domain: question.domain,
+      fromQuestion: question.id,
+    }))
+    navigate(`/learn/${toDomainSlug(question.domain)}`)
   }
 
   return (
@@ -90,9 +101,9 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
         })}
       </div>
 
-      {/* Explain button — only shown after answering */}
       {selectedAnswer && (
-        <div className="mt-4">
+        <div className="mt-4 space-y-3">
+          {/* Explain button */}
           {!explanation && (
             <button
               onClick={fetchExplanation}
@@ -100,10 +111,7 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
               className="w-full py-2.5 rounded-xl border border-gold/40 text-gold text-sm font-medium hover:bg-gold/10 disabled:opacity-60 transition-all flex items-center justify-center gap-2"
             >
               {explaining ? (
-                <>
-                  <span className="animate-spin text-base">⟳</span>
-                  Generating explanation…
-                </>
+                <><span className="animate-spin text-base">⟳</span>Generating explanation…</>
               ) : (
                 <>🧠 Explain this question</>
               )}
@@ -111,12 +119,22 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
           )}
 
           {explanation && (
-            <div className="mt-3 rounded-xl border border-gold/30 bg-gold/5 p-4 text-sm">
+            <div className="rounded-xl border border-gold/30 bg-gold/5 p-4 text-sm">
               <div
                 className="text-cream leading-relaxed space-y-1"
                 dangerouslySetInnerHTML={{ __html: renderMarkdown(explanation) }}
               />
             </div>
+          )}
+
+          {/* Study topic button — only shown when wrong */}
+          {isWrong && (
+            <button
+              onClick={handleStudyTopic}
+              className="w-full py-2.5 rounded-xl border border-white/20 text-mist text-sm hover:border-gold/40 hover:text-gold transition-all flex items-center justify-center gap-2"
+            >
+              📚 Study {question.sourceTopic ? `"${question.sourceTopic}"` : 'this topic'} →
+            </button>
           )}
         </div>
       )}
