@@ -1,0 +1,8 @@
+{
+	"name": "ccxp-auth",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-04-29",
+	"observability": {
+		"enabled": true,
+	},
+}
