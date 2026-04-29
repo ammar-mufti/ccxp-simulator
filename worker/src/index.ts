@@ -68,27 +68,14 @@ function extractJson(text: string): string {
 
 function buildPrompt(type: string, domain: string, count?: number, extra?: string): string {
   if (type === 'generate-questions') {
-    const domainContext: Record<string, string> = {
-      'CX Strategy': 'vision, business case, maturity models, roadmap, governance',
-      'Customer-Centric Culture': 'culture change, employee engagement, leadership buy-in, behaviors',
-      'Voice of Customer': 'VoC programs, listening posts, research methods, insight, closed loop',
-      'Experience Design': 'journey mapping, service design, design thinking, prototyping',
-      'Metrics & Measurement': 'NPS, CSAT, CES, ROI, linkage analysis, dashboards, benchmarking',
-      'Organizational Adoption': 'change management, cross-functional alignment, CX roles, governance',
-    }
+    // Frontend sends the full crafted prompt in extra — use it directly
+    if (extra && extra.length > 100) return extra
+    // Fallback basic prompt (should rarely be reached)
     return `You are a CCXP exam question writer. Generate exactly ${count ?? 5} multiple-choice questions for domain: "${domain}".
-
-Rules:
-- Realistic CCXP difficulty (CXPA standard)
-- 4 choices: a, b, c, d — exactly ONE correct answer
-- Explanation must be under 25 words
-- Vary types: scenario, definition, best-practice, framework
-- Output ONLY a raw JSON array, no markdown, no preamble
-
-Format:
-[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"..."}]
-
-Domain context: ${domainContext[domain] ?? domain}`
+STRICT: Every question must be unique, domain-specific, and require genuine CX knowledge.
+NEVER use generic stems. All 4 answer options must be plausible CX concepts.
+Output ONLY a raw JSON array:
+[{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words"}]`
   }
 
   if (type === 'generate-content') {
