@@ -200,27 +200,46 @@ function getFallback(domain: string, seen: Set<string>): Question | null {
   return null
 }
 
+export interface GenProgress {
+  percent: number
+  collected: number
+  total: number
+  currentDomain: string
+  message: string
+}
+
 export function useQuestionGen() {
   const token = useAuthStore(s => s.token) ?? ''
 
   const generateForMode = useCallback(async (
     mode: ExamMode,
     domain: string | null,
-    onProgress: (loaded: number, total: number, domainLabel: string, uniqueCount: number, targetCount: number) => void
+    onProgress: (p: GenProgress) => void
   ): Promise<Question[]> => {
     const weights = DOMAIN_WEIGHTS[mode]
     const domains = domain ? [domain] : Object.keys(weights)
+
+    // Total questions needed — progress denominator never changes
+    const totalNeeded = domains.reduce((sum, d) => sum + (domain ? (weights[d] ?? 10) : (weights[d] ?? 0)), 0)
+    let questionsCollected = 0
+
+    const report = (currentDomain: string) => {
+      onProgress({
+        percent: Math.min(Math.round((questionsCollected / totalNeeded) * 100), 99),
+        collected: questionsCollected,
+        total: totalNeeded,
+        currentDomain,
+        message: currentDomain
+          ? `Generating ${currentDomain} questions (${questionsCollected}/${totalNeeded} ready)…`
+          : 'Preparing questions…',
+      })
+    }
 
     // Shared seen set across ALL domains — prevents cross-domain duplicates
     const seenQuestions = new Set<string>()
     const allQuestions: Question[] = []
 
-    const totalChunks = domains.reduce((sum, d) => {
-      const total = domain ? (weights[d] ?? 10) : (weights[d] ?? 0)
-      return sum + Math.ceil(total / CHUNK_SIZE)
-    }, 0)
-    let chunksLoaded = 0
-    onProgress(0, totalChunks, '', 0, 0)
+    report('')
 
     for (const d of domains) {
       const targetCount = domain ? (weights[d] ?? 10) : (weights[d] ?? 0)
@@ -232,7 +251,6 @@ export function useQuestionGen() {
         const needed = targetCount - domainQuestions.length
         const chunkSize = Math.min(needed, CHUNK_SIZE)
 
-        // Pass seen question texts as topic exclusions
         const seenTopics = [...seenQuestions].slice(0, 15)
         const prompt = buildPrompt(d, chunkSize, seenTopics)
 
@@ -247,8 +265,7 @@ export function useQuestionGen() {
           if (batch.length >= 2 && !validateBatch(batch)) {
             console.warn(`Batch validation failed for ${d} — regenerating`)
             attempts++
-            chunksLoaded++
-            onProgress(chunksLoaded, totalChunks, d, domainQuestions.length, targetCount)
+            report(d)
             continue
           }
 
@@ -261,14 +278,17 @@ export function useQuestionGen() {
           })
 
           domainQuestions.push(...uniqueBatch)
+          questionsCollected += uniqueBatch.length
         } catch {
           const fallback = getFallback(d, seenQuestions)
-          if (fallback) domainQuestions.push(fallback)
+          if (fallback) {
+            domainQuestions.push(fallback)
+            questionsCollected += 1
+          }
         }
 
         attempts++
-        chunksLoaded++
-        onProgress(chunksLoaded, totalChunks, d, domainQuestions.length, targetCount)
+        report(d)
       }
 
       // Pad with curated fallbacks if still short
@@ -276,6 +296,7 @@ export function useQuestionGen() {
         const fallback = getFallback(d, seenQuestions)
         if (fallback) {
           domainQuestions.push(fallback)
+          questionsCollected += 1
         } else {
           break
         }
@@ -295,6 +316,15 @@ export function useQuestionGen() {
 
     console.log('Total generated:', allQuestions.length)
     console.log('Unique questions:', dedupedQuestions.length)
+
+    // Signal 100% only after everything is ready
+    onProgress({
+      percent: 100,
+      collected: dedupedQuestions.length,
+      total: totalNeeded,
+      currentDomain: '',
+      message: 'Questions ready — starting exam…',
+    })
 
     return fisherYates(dedupedQuestions)
   }, [token])
