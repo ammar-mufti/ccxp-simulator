@@ -1,12 +1,15 @@
 import { Link, useLocation } from 'react-router-dom'
 import { useAuthStore } from '../../store/authStore'
+import { useHistoryStore } from '../../store/historyStore'
 
 export default function TopNav() {
   const { user, logout } = useAuthStore()
   const location = useLocation()
+  const attemptCount = useHistoryStore(s => s.attempts.length)
 
   const isLearn = location.pathname.startsWith('/learn')
   const isExam = location.pathname.startsWith('/exam') || location.pathname.startsWith('/results')
+  const isHistory = location.pathname.startsWith('/history')
 
   return (
     <nav className="bg-ink border-b border-white/10 sticky top-0 z-50">
@@ -29,6 +32,21 @@ export default function TopNav() {
               }`}
             >
               📝 Exam
+            </Link>
+            <Link
+              to="/history"
+              className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
+                isHistory ? 'bg-gold text-navy' : 'text-mist hover:text-cream'
+              }`}
+            >
+              📊 History
+              {attemptCount > 0 && (
+                <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                  isHistory ? 'bg-navy/30 text-navy' : 'bg-white/10 text-mist'
+                }`}>
+                  {attemptCount}
+                </span>
+              )}
             </Link>
           </div>
         </div>

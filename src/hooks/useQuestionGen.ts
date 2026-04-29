@@ -1,9 +1,10 @@
 import { useCallback } from 'react'
 import { callLLM } from '../services/llm'
 import type { Question, ExamMode } from '../store/examStore'
-import { DOMAIN_WEIGHTS } from '../store/examStore'
+import { DOMAIN_WEIGHTS, useExamStore } from '../store/examStore'
 import { useAuthStore } from '../store/authStore'
 import { DOMAIN_TOPICS, toTopicSlug } from '../utils/domainUtils'
+import { questionBank } from '../services/questionBank'
 
 const CHUNK_SIZE = 5
 const CHUNK_RETRIES = 3
@@ -201,6 +202,7 @@ export interface GenProgress {
 
 export function useQuestionGen() {
   const token = useAuthStore(s => s.token) ?? ''
+  const setCurrentSetId = useExamStore(s => s.setCurrentSetId)
 
   const generateForMode = useCallback(async (
     mode: ExamMode,
@@ -352,15 +354,22 @@ export function useQuestionGen() {
       )
     }
 
+    const shuffled = fisherYates(dedupedQuestions)
+
+    // Save to question bank for future retakes
+    const savedSet = questionBank.save(shuffled, mode, domains)
+    console.log('[QuestionGen] Saved to question bank:', savedSet.id)
+    setCurrentSetId(savedSet.id)
+
     onProgress({
       percent: 100,
-      collected: dedupedQuestions.length,
+      collected: shuffled.length,
       total: totalNeeded,
       currentDomain: '',
       message: 'Questions ready — starting exam…',
     })
 
-    return fisherYates(dedupedQuestions)
+    return shuffled
   }, [token])
 
   return { generateForMode }

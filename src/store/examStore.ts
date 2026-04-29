@@ -29,8 +29,10 @@ interface ExamState {
   loadingMessage: string
   error: string | null
   explanations: Record<string, string>
+  currentSetId: string | null
   setMode: (mode: ExamMode, domain?: string) => void
   setQuestions: (questions: Question[]) => void
+  setCurrentSetId: (id: string | null) => void
   answerQuestion: (id: string, answer: string) => void
   navigateTo: (index: number) => void
   submitExam: () => void
@@ -52,9 +54,14 @@ export const useExamStore = create<ExamState>((set, get) => ({
   loadingMessage: 'Generating questions…',
   error: null,
   explanations: {},
+  currentSetId: null,
 
   setMode(mode, domain) {
-    set({ mode, selectedDomain: domain ?? null, questions: [], answers: {}, currentIndex: 0, submitted: false })
+    set({ mode, selectedDomain: domain ?? null, questions: [], answers: {}, currentIndex: 0, submitted: false, currentSetId: null })
+  },
+
+  setCurrentSetId(id) {
+    set({ currentSetId: id })
   },
 
   setQuestions(rawQuestions) {
@@ -82,7 +89,7 @@ export const useExamStore = create<ExamState>((set, get) => ({
   },
 
   resetExam() {
-    set({ mode: null, selectedDomain: null, questions: [], answers: {}, currentIndex: 0, submitted: false, error: null, explanations: {} })
+    set({ mode: null, selectedDomain: null, questions: [], answers: {}, currentIndex: 0, submitted: false, error: null, explanations: {}, currentSetId: null })
     sessionStorage.removeItem('ccxp_exam_session')
   },
 

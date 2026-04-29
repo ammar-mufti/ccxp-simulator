@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage'
 import LearnPage from './pages/LearnPage'
 import ExamPage from './pages/ExamPage'
 import ResultsPage from './pages/ResultsPage'
+import HistoryPage from './pages/HistoryPage'
 import TutorChat from './components/AI/TutorChat'
 
 function OfflineBanner() {
@@ -44,6 +45,7 @@ export default function App() {
         <Route path="/learn/:domainSlug" element={<ProtectedRoute><LearnPage /></ProtectedRoute>} />
         <Route path="/exam/*" element={<ProtectedRoute><ExamPage /></ProtectedRoute>} />
         <Route path="/results" element={<ProtectedRoute><ResultsPage /></ProtectedRoute>} />
+        <Route path="/history" element={<ProtectedRoute><HistoryPage /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/learn" replace />} />
       </Routes>
       {/* AI Tutor — shown when logged in */}
