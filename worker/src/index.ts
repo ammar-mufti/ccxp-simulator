@@ -95,6 +95,9 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
   ]
   let lastError = ''
 
+  console.log('GROQ KEY prefix:', env.GROQ_API_KEY?.substring(0, 10))
+  console.log('GROQ KEY length:', env.GROQ_API_KEY?.length)
+
   for (const model of models) {
     try {
       console.log(`Trying Groq model: ${model}`)
@@ -112,7 +115,10 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
       console.log(`Groq ${model} status:`, res.status)
 
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`Groq API key is invalid (${res.status}). Please update GROQ_API_KEY worker secret.`)
+        const errorBody = await res.text()
+        throw new Error(
+          `Groq key invalid (${res.status}). Key prefix: ${env.GROQ_API_KEY?.substring(0, 8)}. Error: ${errorBody}`
+        )
       }
 
       if (res.status === 429) {
@@ -200,6 +206,27 @@ export default {
       const jwt = await signJwt({ login: user.login, avatar: user.avatar_url, name: user.name ?? user.login }, env.JWT_SECRET)
 
       return Response.redirect(`https://ammar-mufti.github.io/ccxp-simulator/login?token=${jwt}`, 302)
+    }
+
+    // Public test endpoint — checks Groq key without requiring JWT
+    if (url.pathname === '/api/test-groq' && request.method === 'GET') {
+      const keyPrefix = env.GROQ_API_KEY?.substring(0, 8) ?? 'MISSING'
+      const keyLength = env.GROQ_API_KEY?.length ?? 0
+      try {
+        const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+          body: JSON.stringify({
+            model: 'llama-3.1-8b-instant',
+            max_tokens: 10,
+            messages: [{ role: 'user', content: 'Say hi' }],
+          }),
+        })
+        const body = await res.text()
+        return jsonRes({ status: res.status, keyPrefix, keyLength, body: body.slice(0, 300) }, 200, origin)
+      } catch (err) {
+        return jsonRes({ error: String(err), keyPrefix, keyLength }, 500, origin)
+      }
     }
 
     if (url.pathname === '/api/llm' && request.method === 'POST') {

@@ -73,6 +73,11 @@ export default function DomainPage() {
   const [jumpedBannerTopic, setJumpedBannerTopic] = useState<string | null>(null)
   const [showRegenPanel, setShowRegenPanel] = useState(false)
 
+  // Scroll center panel to top on mount (component remounts per domain via key prop)
+  useEffect(() => {
+    document.getElementById('main-scroll')?.scrollTo({ top: 0 })
+  }, [])
+
   // Read navigation target from sessionStorage on mount
   useEffect(() => {
     const sidebarNav = sessionStorage.getItem('ccxp_sidebar_expand_topic')

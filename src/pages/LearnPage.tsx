@@ -9,7 +9,7 @@ export default function LearnPage() {
   return (
     <div className="h-screen flex flex-col bg-navy">
       <TopNav />
-      {domainSlug ? <DomainPage /> : <LearnHome />}
+      {domainSlug ? <DomainPage key={domainSlug} /> : <LearnHome />}
     </div>
   )
 }

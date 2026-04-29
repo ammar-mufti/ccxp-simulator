@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { DOMAINS, DOMAIN_COLORS } from '../../store/examStore'
 import { useLearnStore, DOMAIN_WEIGHTS_DISPLAY } from '../../store/learnStore'
 import { DOMAIN_TOPICS, toDomainSlug } from '../../utils/domainUtils'
@@ -17,9 +17,13 @@ interface Props {
   activeDomain?: string
 }
 
-export default function DomainNav({ activeDomain }: Props) {
+export default function DomainNav({ activeDomain: _activeDomain }: Props) {
   const navigate = useNavigate()
+  const location = useLocation()
   const { getDomainProgress, progress } = useLearnStore()
+
+  // Derive active domain from URL — always accurate, even during navigation
+  const activeDomain = DOMAINS.find(d => location.pathname.includes(toDomainSlug(d))) ?? _activeDomain
 
   const overallProgress = Math.round(
     DOMAINS.reduce((sum, d) => sum + getDomainProgress(d), 0) / DOMAINS.length

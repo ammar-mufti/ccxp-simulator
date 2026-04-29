@@ -18,7 +18,7 @@ export default function LearnLayout({ children, showPageNav = false, activeDomai
       </aside>
 
       {/* Center scrollable content */}
-      <main className="flex-1 overflow-y-auto min-w-0">
+      <main id="main-scroll" className="flex-1 overflow-y-auto min-w-0">
         {children}
       </main>
 
