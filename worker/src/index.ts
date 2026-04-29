@@ -220,21 +220,106 @@ export default {
 
     // LLM proxy
     if (url.pathname === '/api/llm' && request.method === 'POST') {
-      // Validate JWT
       const authHeader = request.headers.get('Authorization') ?? ''
       const token = authHeader.replace('Bearer ', '')
       const payload = await verifyJwt(token, env.JWT_SECRET)
       if (!payload) return jsonRes({ error: 'Unauthorized' }, 401, origin)
 
-      const body = await request.json() as { type: string; domain: string; count?: number; extra?: string }
+      const body = await request.json() as {
+        type: string
+        domain: string
+        count?: number
+        extra?: string
+        // tutor-chat
+        messages?: Array<{ role: string; content: string }>
+        systemPrompt?: string
+        pageContext?: string
+        // explain-question
+        question?: string
+        a?: string
+        b?: string
+        c?: string
+        d?: string
+        correct?: string
+        userAnswer?: string
+      }
+
+      // ── Tutor chat ──────────────────────────────────────────────────────
+      if (body.type === 'tutor-chat') {
+        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, connect back to how topics appear on the exam, keep responses under 200 words unless detail is needed, encourage the user — they are days from their exam.`
+
+        const messages = (body.messages ?? []).slice(-10)
+        const groqMessages = [
+          { role: 'system', content: systemPrompt },
+          ...messages,
+        ]
+
+        let response = ''
+        try {
+          const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+            body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
+          })
+          if (res.status === 429) {
+            await new Promise(r => setTimeout(r, 3000))
+            throw new Error('RATE_LIMIT')
+          }
+          if (res.ok) {
+            const data = await res.json() as { choices: Array<{ message: { content: string } }> }
+            response = data.choices?.[0]?.message?.content ?? ''
+          }
+        } catch {
+          try {
+            response = await callGemini(systemPrompt + '\n\nUser: ' + (messages[messages.length - 1]?.content ?? ''), env.GEMINI_API_KEY)
+          } catch {
+            response = "I'm having trouble connecting right now. Please try again in a moment."
+          }
+        }
+        return jsonRes({ response }, 200, origin)
+      }
+
+      // ── Explain question ─────────────────────────────────────────────────
+      if (body.type === 'explain-question') {
+        const optLabels: Record<string, string> = { a: body.a ?? '', b: body.b ?? '', c: body.c ?? '', d: body.d ?? '' }
+        const correctText = optLabels[body.correct ?? ''] ?? ''
+        const userText = optLabels[body.userAnswer ?? ''] ?? ''
+        const wasCorrect = body.userAnswer === body.correct
+
+        const prompt = `A CCXP exam candidate just answered this question.
+
+Question: ${body.question}
+Option A: ${body.a}
+Option B: ${body.b}
+Option C: ${body.c}
+Option D: ${body.d}
+Correct answer: (${body.correct?.toUpperCase()}) ${correctText}
+Candidate selected: (${body.userAnswer?.toUpperCase()}) ${userText}
+${wasCorrect ? 'They got it RIGHT.' : 'They got it WRONG.'}
+
+Explain in exactly 3 parts using this format:
+**WHY (${body.correct?.toUpperCase()}) is correct:**
+[1-2 sentences, exam-focused]
+
+**Why the others are wrong:**
+${['a','b','c','d'].filter(o => o !== body.correct).map(o => `(${o.toUpperCase()}) [one sentence why wrong]`).join('\n')}
+
+**💡 Exam Tip:**
+[One sentence memory tip for the exam]
+
+Keep total response under 150 words. Bold key CX terms. Domain: ${body.domain}`
+
+        const raw = await llm(prompt, env)
+        return jsonRes({ explanation: raw }, 200, origin)
+      }
+
+      // ── Content generation (existing) ────────────────────────────────────
       const prompt = buildPrompt(body.type, body.domain, body.count, body.extra)
       const raw = await llm(prompt, env)
 
-      // For overview, return plain text; for everything else try to parse JSON
       if (body.extra === 'overview') {
         return jsonRes({ content: raw }, 200, origin)
       }
-
       try {
         const parsed = JSON.parse(extractJson(raw))
         return jsonRes(parsed, 200, origin)

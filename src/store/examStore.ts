@@ -24,6 +24,7 @@ interface ExamState {
   isLoading: boolean
   loadingMessage: string
   error: string | null
+  explanations: Record<string, string>
   setMode: (mode: ExamMode, domain?: string) => void
   setQuestions: (questions: Question[]) => void
   answerQuestion: (id: string, answer: string) => void
@@ -32,6 +33,7 @@ interface ExamState {
   resetExam: () => void
   setLoading: (loading: boolean, message?: string) => void
   setError: (error: string | null) => void
+  setExplanation: (id: string, text: string) => void
 }
 
 export const useExamStore = create<ExamState>((set) => ({
@@ -44,6 +46,7 @@ export const useExamStore = create<ExamState>((set) => ({
   isLoading: false,
   loadingMessage: 'Generating questions…',
   error: null,
+  explanations: {},
 
   setMode(mode, domain) {
     set({ mode, selectedDomain: domain ?? null, questions: [], answers: {}, currentIndex: 0, submitted: false })
@@ -75,8 +78,12 @@ export const useExamStore = create<ExamState>((set) => ({
   },
 
   resetExam() {
-    set({ mode: null, selectedDomain: null, questions: [], answers: {}, currentIndex: 0, submitted: false, error: null })
+    set({ mode: null, selectedDomain: null, questions: [], answers: {}, currentIndex: 0, submitted: false, error: null, explanations: {} })
     sessionStorage.removeItem('ccxp_exam_session')
+  },
+
+  setExplanation(id, text) {
+    set(state => ({ explanations: { ...state.explanations, [id]: text } }))
   },
 
   setLoading(loading, message = 'Generating questions…') {

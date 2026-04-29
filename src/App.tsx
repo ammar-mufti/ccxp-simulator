@@ -6,6 +6,7 @@ import LoginPage from './pages/LoginPage'
 import LearnPage from './pages/LearnPage'
 import ExamPage from './pages/ExamPage'
 import ResultsPage from './pages/ResultsPage'
+import TutorChat from './components/AI/TutorChat'
 
 function OfflineBanner() {
   const [offline, setOffline] = useState(!navigator.onLine)
@@ -24,6 +25,12 @@ function OfflineBanner() {
   )
 }
 
+function TutorChatWrapper() {
+  const user = useAuthStore(s => s.user)
+  if (!user) return null
+  return <TutorChat />
+}
+
 export default function App() {
   const init = useAuthStore(s => s.init)
   useEffect(() => { init() }, [init])
@@ -38,6 +45,8 @@ export default function App() {
         <Route path="/results" element={<ProtectedRoute><ResultsPage /></ProtectedRoute>} />
         <Route path="*" element={<Navigate to="/learn" replace />} />
       </Routes>
+      {/* AI Tutor — shown when logged in */}
+      <TutorChatWrapper />
     </BrowserRouter>
   )
 }
