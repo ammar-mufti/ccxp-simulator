@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { contentCache } from '../services/contentCache'
 import { useAuthStore } from '../store/authStore'
 import { DOMAIN_TOPICS, toTopicSlug } from '../utils/domainUtils'
@@ -7,10 +7,12 @@ type Stage = 'stage1-summary' | 'stage2-concepts' | 'stage3-deepdive' | 'stage4-
 
 interface Options {
   topic?: string
-  enabled?: boolean
   topics?: string[]
 }
 
+// Returns { data, loading, error, load } — caller controls WHEN to call load()
+// This avoids the enabled-flag re-trigger bug where changing enabled doesn't
+// re-run the effect because load() reference doesn't change.
 export function useStageContent<T>(domain: string, stage: Stage, options?: Options) {
   const [data, setData] = useState<T | null>(null)
   const [loading, setLoading] = useState(false)
@@ -22,6 +24,9 @@ export function useStageContent<T>(domain: string, stage: Stage, options?: Optio
     : `ccxp_${domain}_${stage}`
 
   const load = useCallback(async () => {
+    // Return immediately if already loading or already have data
+    if (loading) return
+
     const cached = contentCache.get<T>(cacheKey)
     if (cached) {
       setData(cached)
@@ -69,9 +74,5 @@ export function useStageContent<T>(domain: string, stage: Stage, options?: Optio
     }
   }, [domain, stage, options?.topic, token, cacheKey])
 
-  useEffect(() => {
-    if (options?.enabled !== false) load()
-  }, [load])
-
-  return { data, loading, error, retry: load }
+  return { data, loading, error, load }
 }

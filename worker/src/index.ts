@@ -85,44 +85,10 @@ function extractJson(text: string, shape: 'array' | 'object'): unknown {
   throw new Error(`Could not parse JSON from LLM output. Preview: ${text.slice(0, 200)}`)
 }
 
-// Calls Groq. Throws on rate-limit or HTTP error — never swallows errors.
-async function callGroq(prompt: string, apiKey: string, maxTokens: number): Promise<string> {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: maxTokens,
-      temperature: 0.4,
-    }),
-  })
-
-  if (res.status === 429) {
-    const body = await res.text()
-    throw new Error(`GROQ_RATE_LIMIT: ${body}`)
-  }
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Groq HTTP ${res.status}: ${body}`)
-  }
-
-  const data = await res.json() as {
-    choices?: Array<{ message?: { content?: string } }>
-    error?: { message: string }
-  }
-
-  if (data.error) throw new Error(`Groq API error: ${data.error.message}`)
-
-  const text = data.choices?.[0]?.message?.content ?? ''
-  if (!text.trim()) throw new Error('Groq returned empty content')
-  return text
-}
-
 // Calls Gemini. Throws on HTTP error or empty response.
 async function callGemini(prompt: string, apiKey: string, maxTokens: number): Promise<string> {
   const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -150,31 +116,63 @@ async function callGemini(prompt: string, apiKey: string, maxTokens: number): Pr
   return text
 }
 
-// Tries Groq first, falls back to Gemini. Throws if both fail — callers decide error handling.
-async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
-  // Groq cap: llama-3.3-70b max_tokens is 32768 but practical limit for JSON is 8192
-  const groqMax = Math.min(maxTokens, 8192)
-  // Gemini cap: gemini-2.0-flash supports up to 8192 output tokens
-  const geminiMax = Math.min(maxTokens, 8192)
+// Calls Groq with a specific model. Throws on error.
+async function callGroqModel(prompt: string, apiKey: string, model: string, maxTokens: number): Promise<string> {
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: maxTokens,
+      temperature: 0.4,
+    }),
+  })
+  if (res.status === 429) throw new Error(`GROQ_RATE_LIMIT_${model}`)
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(`Groq(${model}) HTTP ${res.status}: ${body}`)
+  }
+  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message: string } }
+  if (data.error) throw new Error(`Groq(${model}) API error: ${data.error.message}`)
+  const text = data.choices?.[0]?.message?.content ?? ''
+  if (!text.trim()) throw new Error(`Groq(${model}) returned empty content`)
+  return text
+}
 
-  let groqError = ''
+// Tries 3 providers in order: llama-3.3-70b → llama-3.1-8b-instant → Gemini 2.5 Flash
+async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
+  const cap = Math.min(maxTokens, 8192)
+  const errors: string[] = []
+
+  // 1. Groq primary — llama-3.3-70b-versatile
   try {
-    return await callGroq(prompt, env.GROQ_API_KEY, groqMax)
+    return await callGroqModel(prompt, env.GROQ_API_KEY, 'llama-3.3-70b-versatile', cap)
   } catch (err) {
-    groqError = err instanceof Error ? err.message : String(err)
-    console.error('Groq failed:', groqError)
-    // Brief pause before Gemini if rate limited
-    if (groqError.includes('RATE_LIMIT')) {
-      await new Promise(r => setTimeout(r, 2000))
-    }
+    const msg = err instanceof Error ? err.message : String(err)
+    errors.push(`llama-3.3-70b: ${msg}`)
+    console.error('Groq primary failed:', msg)
+    if (msg.includes('RATE_LIMIT')) await new Promise(r => setTimeout(r, 1000))
   }
 
+  // 2. Groq secondary — llama-3.1-8b-instant (separate quota pool)
   try {
-    return await callGemini(prompt, env.GEMINI_API_KEY, geminiMax)
+    return await callGroqModel(prompt, env.GROQ_API_KEY, 'llama-3.1-8b-instant', cap)
   } catch (err) {
-    const geminiError = err instanceof Error ? err.message : String(err)
-    console.error('Gemini also failed:', geminiError)
-    throw new Error(`Both LLMs failed. Groq: ${groqError} | Gemini: ${geminiError}`)
+    const msg = err instanceof Error ? err.message : String(err)
+    errors.push(`llama-3.1-8b: ${msg}`)
+    console.error('Groq secondary failed:', msg)
+    if (msg.includes('RATE_LIMIT')) await new Promise(r => setTimeout(r, 1000))
+  }
+
+  // 3. Gemini 2.5 Flash
+  try {
+    return await callGemini(prompt, env.GEMINI_API_KEY, cap)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    errors.push(`gemini-2.5-flash: ${msg}`)
+    console.error('Gemini fallback failed:', msg)
+    throw new Error(`All 3 LLMs failed — ${errors.join(' | ')}`)
   }
 }
 
@@ -426,19 +424,23 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
 
         let response = ''
         try {
+          // Use multi-turn chat format directly with primary Groq model
           const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
             body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
           })
-          if (res.status === 429) { await new Promise(r => setTimeout(r, 2000)); throw new Error('rate limited') }
+          if (res.status === 429) throw new Error('rate_limit')
           if (res.ok) {
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }
             response = data.choices?.[0]?.message?.content ?? ''
           }
+          if (!response) throw new Error('empty')
         } catch {
           try {
-            response = await callGemini(systemPrompt + '\n\nUser: ' + (messages[messages.length - 1]?.content ?? ''), env.GEMINI_API_KEY, 1024)
+            // Fallback: flatten conversation for single-turn APIs
+            const flatPrompt = systemPrompt + '\n\n' + messages.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')
+            response = await llm(flatPrompt, env, 1024)
           } catch {
             response = "I'm having trouble connecting right now. Please try again in a moment."
           }

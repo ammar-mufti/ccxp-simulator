@@ -26,10 +26,9 @@ function TopicCard({ domain, topic, autoExpand, onRef }: TopicCardProps) {
   const readTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isRead = progress[domain]?.topicsRead.includes(topic.topic) ?? false
 
-  const { data: deepDive, loading: deepLoading, error: deepError, retry: deepRetry } =
+  const { data: deepDive, loading: deepLoading, error: deepError, load: deepLoad } =
     useStageContent<Stage3DeepDive>(domain, 'stage3-deepdive', {
       topic: topic.topic,
-      enabled: showDeepDive,
     })
 
   useEffect(() => {
@@ -50,6 +49,7 @@ function TopicCard({ domain, topic, autoExpand, onRef }: TopicCardProps) {
   function handleGoDeeper() {
     setShowDeepDive(true)
     markTopicRead(domain, topic.topic)
+    if (!deepDive && !deepLoading) deepLoad()
   }
 
   return (
@@ -130,7 +130,7 @@ function TopicCard({ domain, topic, autoExpand, onRef }: TopicCardProps) {
               {deepError && (
                 <div className="mt-4 text-center py-4">
                   <p className="text-fail text-sm mb-2">{deepError}</p>
-                  <button onClick={deepRetry} className="text-gold text-sm border border-gold/40 rounded-lg px-4 py-1.5 hover:bg-gold/10 transition-colors">Retry</button>
+                  <button onClick={deepLoad} className="text-gold text-sm border border-gold/40 rounded-lg px-4 py-1.5 hover:bg-gold/10 transition-colors">Retry</button>
                 </div>
               )}
               {deepDive && !deepLoading && (

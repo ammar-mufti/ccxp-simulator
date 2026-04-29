@@ -6,17 +6,15 @@ import { useLearnStore } from '../../store/learnStore'
 import { DOMAIN_COLORS } from '../../store/examStore'
 import { contentCache } from '../../services/contentCache'
 import type { Stage1Summary, Stage2Topic, Stage4Question } from '../../types/content'
-import type { Flashcard } from '../../store/learnStore'
 import Stage1SummaryComponent from './Stage1Summary'
 import Stage2Concepts from './Stage2Concepts'
 import Stage4Quiz from './Stage4Quiz'
-import FlashcardDeck from './FlashcardDeck'
 
 function Skeleton({ lines = 4 }: { lines?: number }) {
   return (
     <div className="animate-pulse space-y-3">
       {Array.from({ length: lines }).map((_, i) => (
-        <div key={i} className="h-3 bg-white/10 rounded" style={{ width: `${70 + (i % 3) * 10}%` }} />
+        <div key={i} className="h-12 bg-white/5 rounded-xl" style={{ opacity: 1 - i * 0.15 }} />
       ))}
     </div>
   )
@@ -24,9 +22,9 @@ function Skeleton({ lines = 4 }: { lines?: number }) {
 
 function ErrorRetry({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
-    <div className="text-center py-8">
-      <p className="text-fail text-sm mb-3">{message}</p>
-      <button onClick={onRetry} className="bg-gold text-navy font-bold px-6 py-2 rounded-xl hover:bg-amber-400 transition-colors text-sm">
+    <div className="bg-fail/10 border border-fail/30 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+      <p className="text-fail text-sm">{message}</p>
+      <button onClick={onRetry} className="bg-gold text-navy font-bold px-4 py-1.5 rounded-lg text-sm flex-shrink-0 hover:bg-amber-400 transition-colors">
         Retry
       </button>
     </div>
@@ -61,13 +59,13 @@ export default function DomainPage() {
   const domain = fromDomainSlug(domainSlug ?? '')
   const navigate = useNavigate()
   const topicRefs = useRef<Record<string, HTMLDivElement | null>>({})
-  const { progress, markFlashcardKnown } = useLearnStore()
+  useLearnStore()
 
   const [autoExpandTopic, setAutoExpandTopic] = useState<string | null>(null)
   const [jumpedBannerTopic, setJumpedBannerTopic] = useState<string | null>(null)
   const [showRegenPanel, setShowRegenPanel] = useState(false)
 
-  // Check for exam-navigation target
+  // Read exam-navigation target from sessionStorage once on mount
   useEffect(() => {
     const raw = sessionStorage.getItem('ccxp_navigate_to_topic')
     if (raw) {
@@ -80,7 +78,6 @@ export default function DomainPage() {
     }
   }, [])
 
-  // Redirect if invalid domain
   useEffect(() => {
     if (domain && !DOMAIN_TOPICS[domain]) navigate('/learn', { replace: true })
   }, [domain, navigate])
@@ -88,35 +85,35 @@ export default function DomainPage() {
   const color = DOMAIN_COLORS[domain] ?? '#C9A84C'
   const topics = DOMAIN_TOPICS[domain] ?? []
   const generatedDate = contentCache.getGeneratedDate(domain)
-  const domainProgress = progress[domain]
 
-  const {
-    data: stage1, loading: s1Loading, error: s1Error, retry: s1Retry,
-  } = useStageContent<Stage1Summary>(domain, 'stage1-summary', { enabled: !!domain })
+  // Each stage has its own hook — caller drives loading via useEffect chains
+  const s1 = useStageContent<Stage1Summary>(domain, 'stage1-summary')
+  const s2 = useStageContent<Stage2Topic[]>(domain, 'stage2-concepts', { topics })
+  const s4 = useStageContent<Stage4Question[]>(domain, 'stage4-quiz')
 
-  const {
-    data: stage2, loading: s2Loading, error: s2Error, retry: s2Retry,
-  } = useStageContent<Stage2Topic[]>(domain, 'stage2-concepts', {
-    enabled: !!stage1,
-    topics,
-  })
+  // Stage 1 — load immediately on mount / domain change
+  useEffect(() => {
+    if (domain && DOMAIN_TOPICS[domain]) s1.load()
+  }, [domain]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const {
-    data: flashcards, loading: flashLoading,
-  } = useStageContent<Flashcard[]>(domain, 'stage4-quiz', { enabled: !!stage1 })
+  // Stage 2 — load once stage1 data arrives
+  useEffect(() => {
+    if (s1.data && !s2.data && !s2.loading) s2.load()
+  }, [s1.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const {
-    data: quizQuestions, loading: quizLoading, error: quizError, retry: quizRetry,
-  } = useStageContent<Stage4Question[]>(domain, 'stage4-quiz', { enabled: !!stage2 })
+  // Stage 4 / Flashcards — load in background once stage2 data arrives
+  useEffect(() => {
+    if (s2.data && !s4.data && !s4.loading) s4.load()
+  }, [s2.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Scroll to auto-expand topic after stage2 loads
   useEffect(() => {
-    if (autoExpandTopic && stage2 && topicRefs.current[autoExpandTopic]) {
+    if (autoExpandTopic && s2.data && topicRefs.current[autoExpandTopic]) {
       setTimeout(() => {
         topicRefs.current[autoExpandTopic]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       }, 300)
     }
-  }, [autoExpandTopic, stage2])
+  }, [autoExpandTopic, s2.data])
 
   if (!domain || !DOMAIN_TOPICS[domain]) return null
 
@@ -147,7 +144,6 @@ export default function DomainPage() {
           <button
             onClick={() => setShowRegenPanel(p => !p)}
             className="text-mist/50 hover:text-mist text-xs transition-colors"
-            title="Regenerate content"
           >
             ↺ Regenerate
           </button>
@@ -158,7 +154,6 @@ export default function DomainPage() {
         <RegeneratePanel domain={domain} onCancel={() => setShowRegenPanel(false)} />
       )}
 
-      {/* Jumped from exam banner */}
       {jumpedBannerTopic && (
         <div className="bg-gold/10 border border-gold/30 rounded-xl px-4 py-3 flex items-start gap-3">
           <span className="text-gold flex-shrink-0">📍</span>
@@ -169,21 +164,27 @@ export default function DomainPage() {
         </div>
       )}
 
-      {/* STAGE 1 */}
-      {s1Loading && <Skeleton lines={8} />}
-      {s1Error && <ErrorRetry message={s1Error} onRetry={s1Retry} />}
-      {stage1 && <Stage1SummaryComponent data={stage1} />}
+      {/* ── STAGE 1 ── */}
+      {s1.loading && <Skeleton lines={5} />}
+      {s1.error && <ErrorRetry message={s1.error} onRetry={s1.load} />}
+      {s1.data && <Stage1SummaryComponent data={s1.data} />}
 
-      {/* STAGE 2 */}
-      {stage1 && (
+      {/* ── STAGE 2: Key Concepts ── */}
+      {(s1.data || s1.loading) && (
         <div>
           <h2 className="text-cream font-semibold text-lg mb-3">Key Concepts</h2>
-          {s2Loading && <Skeleton lines={6} />}
-          {s2Error && <ErrorRetry message={s2Error} onRetry={s2Retry} />}
-          {stage2 && (
+          {s2.loading && <Skeleton lines={6} />}
+          {s2.error && <ErrorRetry message={s2.error} onRetry={s2.load} />}
+          {!s2.loading && !s2.error && !s2.data && s1.data && (
+            <div className="text-mist text-sm p-4 bg-white/5 rounded-xl flex items-center justify-between">
+              <span>Concepts not yet generated</span>
+              <button onClick={s2.load} className="text-gold text-sm font-semibold hover:underline">Generate →</button>
+            </div>
+          )}
+          {s2.data && s2.data.length > 0 && (
             <Stage2Concepts
               domain={domain}
-              topics={stage2}
+              topics={s2.data}
               autoExpandTopic={autoExpandTopic}
               topicRefs={topicRefs}
             />
@@ -191,31 +192,20 @@ export default function DomainPage() {
         </div>
       )}
 
-      {/* FLASHCARDS */}
-      {stage1 && (
-        <div>
-          <h2 className="text-cream font-semibold text-lg mb-3">Flashcards</h2>
-          {flashLoading && <Skeleton lines={4} />}
-          {flashcards && Array.isArray(flashcards) && flashcards.length > 0 && (
-            <div className="bg-ink rounded-2xl border border-white/10 p-6">
-              <FlashcardDeck
-                flashcards={flashcards as Flashcard[]}
-                knownIndices={domainProgress?.flashcardsKnown ?? []}
-                onMarkKnown={i => markFlashcardKnown(domain, i)}
-              />
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* STAGE 4 QUIZ */}
-      {stage2 && (
+      {/* ── STAGE 4: Quiz ── */}
+      {s2.data && (
         <div>
           <h2 className="text-cream font-semibold text-lg mb-3">Quick Quiz</h2>
-          {quizLoading && <Skeleton lines={4} />}
-          {quizError && <ErrorRetry message={quizError} onRetry={quizRetry} />}
-          {quizQuestions && Array.isArray(quizQuestions) && quizQuestions.length > 0 && (
-            <Stage4Quiz questions={quizQuestions as Stage4Question[]} domain={domain} />
+          {s4.loading && <Skeleton lines={4} />}
+          {s4.error && <ErrorRetry message={s4.error} onRetry={s4.load} />}
+          {s4.data && Array.isArray(s4.data) && s4.data.length > 0 && (
+            <Stage4Quiz questions={s4.data as Stage4Question[]} domain={domain} />
+          )}
+          {!s4.loading && !s4.error && (!s4.data || (s4.data as Stage4Question[]).length === 0) && (
+            <div className="text-mist text-sm p-4 bg-white/5 rounded-xl flex items-center justify-between">
+              <span>Quiz not yet generated</span>
+              <button onClick={s4.load} className="text-gold text-sm font-semibold hover:underline">Generate →</button>
+            </div>
           )}
         </div>
       )}
