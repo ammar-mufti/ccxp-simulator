@@ -5,6 +5,7 @@ import { DOMAIN_COLORS, DOMAINS } from '../../store/examStore'
 import { toDomainSlug } from '../../utils/domainUtils'
 import { contentCache } from '../../services/contentCache'
 import StudyPlanPanel from './StudyPlanPanel'
+import LearnLayout from './LearnLayout'
 
 const DOMAIN_ICONS: Record<string, string> = {
   'CX Strategy': '🎯',
@@ -53,7 +54,8 @@ export default function LearnHome() {
   }
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-8">
+    <LearnLayout>
+    <div className="max-w-3xl mx-auto px-6 py-8">
       {/* Toast */}
       {toast && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 bg-pass text-white text-sm font-medium px-5 py-2.5 rounded-xl shadow-lg">
@@ -214,5 +216,6 @@ export default function LearnHome() {
         )}
       </div>
     </div>
+    </LearnLayout>
   )
 }

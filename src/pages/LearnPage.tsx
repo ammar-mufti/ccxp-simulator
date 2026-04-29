@@ -7,7 +7,7 @@ export default function LearnPage() {
   const { domainSlug } = useParams<{ domainSlug?: string }>()
 
   return (
-    <div className="min-h-screen bg-navy">
+    <div className="h-screen flex flex-col bg-navy">
       <TopNav />
       {domainSlug ? <DomainPage /> : <LearnHome />}
     </div>
