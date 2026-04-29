@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { fromDomainSlug, DOMAIN_TOPICS } from '../../utils/domainUtils'
+import { fromDomainSlug, DOMAIN_TOPICS, toTopicSlug } from '../../utils/domainUtils'
 import { useStageContent } from '../../hooks/useStageContent'
 import { useLearnStore } from '../../store/learnStore'
 import { DOMAIN_COLORS } from '../../store/examStore'
@@ -68,18 +68,31 @@ export default function DomainPage() {
   const topicRefs = useRef<Record<string, HTMLDivElement | null>>({})
   useLearnStore()
 
+
   const [autoExpandTopic, setAutoExpandTopic] = useState<string | null>(null)
   const [jumpedBannerTopic, setJumpedBannerTopic] = useState<string | null>(null)
   const [showRegenPanel, setShowRegenPanel] = useState(false)
 
+  // Read navigation target from sessionStorage on mount
   useEffect(() => {
-    const raw = sessionStorage.getItem('ccxp_navigate_to_topic')
-    if (raw) {
+    const sidebarNav = sessionStorage.getItem('ccxp_sidebar_expand_topic')
+    if (sidebarNav) {
       try {
-        const { sourceTopic } = JSON.parse(raw) as { sourceTopic: string }
+        const { topic } = JSON.parse(sidebarNav) as { topic: string }
+        sessionStorage.removeItem('ccxp_sidebar_expand_topic')
+        setAutoExpandTopic(topic)
+        console.log('Auto expand target set (sidebar):', topic)
+      } catch { /* ignore */ }
+    }
+
+    const examNav = sessionStorage.getItem('ccxp_navigate_to_topic')
+    if (examNav) {
+      try {
+        const { sourceTopic } = JSON.parse(examNav) as { sourceTopic: string }
         sessionStorage.removeItem('ccxp_navigate_to_topic')
         setAutoExpandTopic(sourceTopic)
         setJumpedBannerTopic(sourceTopic)
+        console.log('Auto expand target set (exam nav):', sourceTopic)
       } catch { /* ignore */ }
     }
   }, [])
@@ -107,13 +120,39 @@ export default function DomainPage() {
     if (s2.data && !s4.data && !s4.loading) s4.load()
   }, [s2.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
+  function handleTopicExpand(topic: string) {
+    setTimeout(() => {
+      const slug = toTopicSlug(topic)
+      const el = document.getElementById(`topic-${slug}`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+        console.log('Scrolled to topic:', topic)
+      } else {
+        console.warn('Topic element not found:', `topic-${slug}`)
+        document.getElementById('key-concepts')?.scrollIntoView({ behavior: 'smooth' })
+      }
+    }, 150)
+  }
+
+  // Trigger auto-expand once Stage 2 data is ready
   useEffect(() => {
-    if (autoExpandTopic && s2.data && topicRefs.current[autoExpandTopic]) {
-      setTimeout(() => {
-        topicRefs.current[autoExpandTopic]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      }, 300)
+    if (!autoExpandTopic || !s2.data) return
+    console.log('Stage 2 ready, expanding topic:', autoExpandTopic)
+    setTimeout(() => {
+      handleTopicExpand(autoExpandTopic)
+      setAutoExpandTopic(null)
+    }, 300)
+  }, [autoExpandTopic, s2.data]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Listen for same-page expand-topic custom event (sidebar click while already on this domain)
+  useEffect(() => {
+    const handler = (e: CustomEvent) => {
+      console.log('expand-topic event received:', e.detail.topic)
+      handleTopicExpand(e.detail.topic)
     }
-  }, [autoExpandTopic, s2.data])
+    window.addEventListener('expand-topic', handler as EventListener)
+    return () => window.removeEventListener('expand-topic', handler as EventListener)
+  }, [s2.data]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!domain || !DOMAIN_TOPICS[domain]) return null
 

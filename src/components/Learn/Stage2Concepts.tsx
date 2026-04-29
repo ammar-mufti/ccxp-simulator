@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import type { Stage2Topic } from '../../types/content'
 import { useLearnStore } from '../../store/learnStore'
 import { useStageContent } from '../../hooks/useStageContent'
+import { toTopicSlug } from '../../utils/domainUtils'
 import type { Stage3DeepDive } from '../../types/content'
 import Stage3DeepDiveComponent from './Stage3DeepDive'
 
@@ -52,8 +53,14 @@ function TopicCard({ domain, topic, autoExpand, onRef }: TopicCardProps) {
     if (!deepDive && !deepLoading) deepLoad()
   }
 
+  const topicSlug = toTopicSlug(topic.topic)
+
   return (
-    <div ref={onRef} className="bg-ink rounded-xl border border-white/10 overflow-hidden transition-all">
+    <div
+      id={`topic-${topicSlug}`}
+      ref={onRef}
+      className="bg-ink rounded-xl border border-white/10 overflow-hidden transition-all"
+    >
       <button
         className="w-full text-left p-4 flex items-center gap-3"
         onClick={() => setExpanded(e => !e)}

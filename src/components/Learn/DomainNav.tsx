@@ -26,12 +26,17 @@ export default function DomainNav({ activeDomain }: Props) {
   )
 
   function handleTopicClick(domain: string, topic: string) {
-    sessionStorage.setItem('ccxp_navigate_to_topic', JSON.stringify({
-      sourceTopic: topic,
-      sourceTopicSlug: '',
-      domain,
-    }))
-    navigate(`/learn/${toDomainSlug(domain)}`)
+    const targetPath = `/learn/${toDomainSlug(domain)}`
+    const currentPath = window.location.pathname
+
+    if (currentPath.includes(toDomainSlug(domain))) {
+      // Already on this domain — dispatch custom event to expand in-place
+      window.dispatchEvent(new CustomEvent('expand-topic', { detail: { topic } }))
+    } else {
+      // Navigate to domain page — DomainPage will read this on mount
+      sessionStorage.setItem('ccxp_sidebar_expand_topic', JSON.stringify({ topic, domain }))
+      navigate(targetPath)
+    }
   }
 
   return (

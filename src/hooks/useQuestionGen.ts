@@ -3,6 +3,7 @@ import { callLLM } from '../services/llm'
 import type { Question, ExamMode } from '../store/examStore'
 import { DOMAIN_WEIGHTS } from '../store/examStore'
 import { useAuthStore } from '../store/authStore'
+import { DOMAIN_TOPICS, toTopicSlug } from '../utils/domainUtils'
 
 const CHUNK_SIZE = 5
 
@@ -138,7 +139,16 @@ function parseQuestions(raw: unknown, domain: string): Question[] {
       return parseQuestions((raw as { content: unknown }).content, domain)
     }
     if (arr.length > 0) {
-      return arr.map(q => ({ ...(q as object), id: crypto.randomUUID(), domain })) as Question[]
+      const topicsForDomain = DOMAIN_TOPICS[domain] ?? []
+      return arr.map(q => {
+        const question = { ...(q as object), id: crypto.randomUUID(), domain } as Question
+        // Ensure sourceTopic is set — LLM sometimes omits it
+        if (!question.sourceTopic && topicsForDomain.length > 0) {
+          question.sourceTopic = topicsForDomain[0]
+          question.sourceTopicSlug = toTopicSlug(topicsForDomain[0])
+        }
+        return question
+      })
     }
   } catch {
     // fall through

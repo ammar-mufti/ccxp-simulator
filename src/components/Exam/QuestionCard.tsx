@@ -60,8 +60,15 @@ export default function QuestionCard({ question, selectedAnswer, onAnswer, quest
   }
 
   function handleStudyTopic() {
+    if (!question.sourceTopic || !question.domain) {
+      console.warn('Question missing sourceTopic or domain:', question)
+      navigate(`/learn/${toDomainSlug(question.domain ?? 'cx-strategy')}`)
+      return
+    }
+
+    console.log('Navigating to study topic:', question.sourceTopic, 'in', question.domain)
     sessionStorage.setItem('ccxp_navigate_to_topic', JSON.stringify({
-      sourceTopic: question.sourceTopic ?? question.domain,
+      sourceTopic: question.sourceTopic,
       sourceTopicSlug: question.sourceTopicSlug ?? '',
       domain: question.domain,
       fromQuestion: question.id,

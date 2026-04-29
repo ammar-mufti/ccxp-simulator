@@ -3,7 +3,6 @@ interface Env {
   GITHUB_CLIENT_SECRET: string
   JWT_SECRET: string
   GROQ_API_KEY: string
-  GEMINI_API_KEY: string
 }
 
 const ALLOWED_ORIGINS = ['https://ammar-mufti.github.io', 'http://localhost:5173']
@@ -85,95 +84,67 @@ function extractJson(text: string, shape: 'array' | 'object'): unknown {
   throw new Error(`Could not parse JSON from LLM output. Preview: ${text.slice(0, 200)}`)
 }
 
-// Calls Gemini. Throws on HTTP error or empty response.
-async function callGemini(prompt: string, apiKey: string, maxTokens: number): Promise<string> {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: maxTokens, temperature: 0.4 },
-      }),
-    }
-  )
-
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Gemini HTTP ${res.status}: ${body}`)
-  }
-
-  const data = await res.json() as {
-    candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>
-    error?: { message: string }
-  }
-
-  if (data.error) throw new Error(`Gemini API error: ${data.error.message}`)
-
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? ''
-  if (!text.trim()) throw new Error('Gemini returned empty content')
-  return text
-}
-
-// Calls Groq with a specific model. Throws on error.
-async function callGroqModel(prompt: string, apiKey: string, model: string, maxTokens: number): Promise<string> {
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content: prompt }],
-      max_tokens: maxTokens,
-      temperature: 0.4,
-    }),
-  })
-  if (res.status === 429) throw new Error(`GROQ_RATE_LIMIT_${model}`)
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`Groq(${model}) HTTP ${res.status}: ${body}`)
-  }
-  const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message: string } }
-  if (data.error) throw new Error(`Groq(${model}) API error: ${data.error.message}`)
-  const text = data.choices?.[0]?.message?.content ?? ''
-  if (!text.trim()) throw new Error(`Groq(${model}) returned empty content`)
-  return text
-}
-
-// Tries 3 providers in order: llama-3.3-70b → llama-3.1-8b-instant → Gemini 2.5 Flash
+// Tries 4 Groq models in order — stops immediately on auth failure
 async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
   const cap = Math.min(maxTokens, 8192)
-  const errors: string[] = []
+  const models = [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
+    'mixtral-8x7b-32768',
+    'gemma2-9b-it',
+  ]
+  let lastError = ''
 
-  // 1. Groq primary — llama-3.3-70b-versatile
-  try {
-    return await callGroqModel(prompt, env.GROQ_API_KEY, 'llama-3.3-70b-versatile', cap)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    errors.push(`llama-3.3-70b: ${msg}`)
-    console.error('Groq primary failed:', msg)
-    if (msg.includes('RATE_LIMIT')) await new Promise(r => setTimeout(r, 1000))
+  for (const model of models) {
+    try {
+      console.log(`Trying Groq model: ${model}`)
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+        body: JSON.stringify({
+          model,
+          max_tokens: cap,
+          temperature: 0.4,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      })
+
+      console.log(`Groq ${model} status:`, res.status)
+
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`Groq API key is invalid (${res.status}). Please update GROQ_API_KEY worker secret.`)
+      }
+
+      if (res.status === 429) {
+        lastError = `${model} rate limited`
+        console.log(`${model} rate limited — trying next model`)
+        continue
+      }
+
+      if (!res.ok) {
+        lastError = `${model} HTTP ${res.status}`
+        continue
+      }
+
+      const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message: string } }
+      const text = data.choices?.[0]?.message?.content ?? ''
+
+      if (!text.trim()) {
+        lastError = `${model} returned empty response`
+        continue
+      }
+
+      console.log(`Success with model: ${model}`)
+      return text
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('API key is invalid')) throw err
+      lastError = msg
+      console.error(`${model} failed:`, err)
+    }
   }
 
-  // 2. Groq secondary — llama-3.1-8b-instant (separate quota pool)
-  try {
-    return await callGroqModel(prompt, env.GROQ_API_KEY, 'llama-3.1-8b-instant', cap)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    errors.push(`llama-3.1-8b: ${msg}`)
-    console.error('Groq secondary failed:', msg)
-    if (msg.includes('RATE_LIMIT')) await new Promise(r => setTimeout(r, 1000))
-  }
-
-  // 3. Gemini 2.5 Flash
-  try {
-    return await callGemini(prompt, env.GEMINI_API_KEY, cap)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    errors.push(`gemini-2.5-flash: ${msg}`)
-    console.error('Gemini fallback failed:', msg)
-    throw new Error(`All 3 LLMs failed — ${errors.join(' | ')}`)
-  }
+  throw new Error(`All Groq models failed. Last error: ${lastError}`)
 }
 
 const DOMAIN_TOPIC_MAP: Record<string, string[]> = {
