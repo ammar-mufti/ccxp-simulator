@@ -49,7 +49,15 @@ export const useExamStore = create<ExamState>((set) => ({
     set({ mode, selectedDomain: domain ?? null, questions: [], answers: {}, currentIndex: 0, submitted: false })
   },
 
-  setQuestions(questions) {
+  setQuestions(rawQuestions) {
+    // Final dedup safety net before exam starts — never blocks exam
+    const seen = new Set<string>()
+    const questions = rawQuestions.filter(q => {
+      const key = q.q.trim().toLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
     set({ questions })
   },
 
