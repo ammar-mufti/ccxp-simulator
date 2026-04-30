@@ -76,7 +76,7 @@ export function useContentGen(domain: string) {
   const setErr = (key: string, val: string | null) => setError(p => ({ ...p, [key]: val }))
 
   const loadOverview = useCallback(async () => {
-    const ck = cacheKey(domain, 'overview')
+    const ck = cacheKey('ccxp', domain, 'overview')
     const cached = cacheGet<string>(ck)
     if (cached) { setOverview(cached); return }
     setLoad('overview', true); setErr('overview', null)
@@ -95,7 +95,7 @@ export function useContentGen(domain: string) {
   }, [domain, token])
 
   const loadTopics = useCallback(async () => {
-    const ck = cacheKey(domain, 'topics')
+    const ck = cacheKey('ccxp', domain, 'topics')
     const cached = cacheGet<TopicContent[]>(ck)
     if (cached) { setTopics(cached); return }
     setLoad('topics', true); setErr('topics', null)
@@ -116,7 +116,7 @@ export function useContentGen(domain: string) {
   }, [domain, token])
 
   const loadFlashcards = useCallback(async () => {
-    const ck = cacheKey(domain, 'flashcards')
+    const ck = cacheKey('ccxp', domain, 'flashcards')
     const cached = cacheGet<Flashcard[]>(ck)
     if (cached) { setFlashcards(cached); return }
     setLoad('flashcards', true); setErr('flashcards', null)
@@ -141,7 +141,7 @@ export function useContentGen(domain: string) {
   }, [domain, token])
 
   const loadQuiz = useCallback(async () => {
-    const ck = cacheKey(domain, 'quiz')
+    const ck = cacheKey('ccxp', domain, 'quiz')
     const cached = cacheGet<QuizQuestion[]>(ck)
     if (cached) { setQuiz(cached); return }
     setLoad('quiz', true); setErr('quiz', null)

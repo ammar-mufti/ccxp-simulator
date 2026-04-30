@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useParams } from 'react-router-dom'
 import { useLearnStore } from '../../store/learnStore'
 import { DOMAIN_TOPICS } from '../../utils/domainUtils'
 
@@ -14,6 +15,8 @@ interface Props {
 
 export default function PageNav({ sections, activeDomain }: Props) {
   const [activeSection, setActiveSection] = useState<string>(sections[0]?.id ?? '')
+  const { certId: certIdParam } = useParams<{ certId?: string }>()
+  const certId = certIdParam ?? 'ccxp'
   const { progress, getDomainProgress } = useLearnStore()
 
   useEffect(() => {
@@ -41,7 +44,7 @@ export default function PageNav({ sections, activeDomain }: Props) {
     document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 
-  const domainProgress = activeDomain ? getDomainProgress(activeDomain) : 0
+  const domainProgress = activeDomain ? getDomainProgress(certId, activeDomain) : 0
   const topicsRead = activeDomain ? (progress[activeDomain]?.topicsRead ?? []) : []
   const topicCount = activeDomain ? (DOMAIN_TOPICS[activeDomain]?.length ?? 0) : 0
 

@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect } from 'react'
 import { Routes, Route, useNavigate, useSearchParams } from 'react-router-dom'
-import { useExamStore, EXAM_DURATIONS } from '../store/examStore'
+import { useExamStore } from '../store/examStore'
 import { useTimer } from '../hooks/useTimer'
+import { getCert } from '../data/certifications'
 import TopNav from '../components/Nav/TopNav'
 import ConfigScreen from '../components/Exam/ConfigScreen'
 import LoadingScreen from '../components/Exam/LoadingScreen'
@@ -10,21 +11,32 @@ import NavigationBar from '../components/Exam/NavigationBar'
 import TimerDisplay from '../components/Exam/TimerDisplay'
 import SubmitModal from '../components/Exam/SubmitModal'
 
-function ActiveExam() {
+interface Props {
+  certId: string
+}
+
+function ActiveExam({ certId }: { certId: string }) {
   const { mode, questions, answers, currentIndex, submitExam, answerQuestion } = useExamStore()
   const navigate = useNavigate()
   const [showModal, setShowModal] = useState(false)
 
+  const cert = getCert(certId)
+
   const handleExpire = useCallback(() => {
     submitExam()
-    navigate('/results', { replace: true })
-  }, [submitExam, navigate])
+    navigate(`/${certId}/results`, { replace: true })
+  }, [submitExam, navigate, certId])
 
-  const duration = mode ? EXAM_DURATIONS[mode] : EXAM_DURATIONS.full
+  // Duration: use cert registry for full exam, fallback to standard timings
+  const fullDuration = cert ? cert.examDuration * 60 : 3 * 60 * 60
+  const miniDuration = 60 * 60
+  const domainDuration = 30 * 60
+  const duration = mode === 'full' ? fullDuration : mode === 'mini' ? miniDuration : domainDuration
+
   const { formatted, timerColor, timerPulse, start, stop } = useTimer(duration, handleExpire)
 
   useEffect(() => {
-    if (questions.length === 0) { navigate('/exam', { replace: true }); return }
+    if (questions.length === 0) { navigate(`/${certId}/exam`, { replace: true }); return }
     start()
     return () => stop()
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -36,12 +48,11 @@ function ActiveExam() {
   function confirm() {
     stop()
     submitExam()
-    navigate('/results', { replace: true })
+    navigate(`/${certId}/results`, { replace: true })
   }
 
   return (
     <div className="min-h-screen bg-navy flex flex-col">
-      {/* Top bar */}
       <div className="bg-ink border-b border-white/10 px-4 py-3 flex items-center justify-between sticky top-0 z-40">
         <div className="text-mist text-sm">
           {questions.length}Q · {mode === 'full' ? 'Full Exam' : mode === 'mini' ? 'Mini Drill' : 'Domain Drill'}
@@ -50,7 +61,6 @@ function ActiveExam() {
         <div className="text-mist text-sm">{Object.keys(answers).length}/{questions.length}</div>
       </div>
 
-      {/* Question */}
       <div className="flex-1 max-w-3xl mx-auto w-full px-4 py-6">
         <QuestionCard
           question={question}
@@ -61,7 +71,6 @@ function ActiveExam() {
         />
       </div>
 
-      {/* Navigation pinned to bottom */}
       <div className="sticky bottom-0 z-40">
         <NavigationBar onSubmit={() => setShowModal(true)} />
       </div>
@@ -73,25 +82,25 @@ function ActiveExam() {
   )
 }
 
-export default function ExamPage() {
+export default function ExamPage({ certId }: Props) {
   const [params] = useSearchParams()
-  const { setMode } = useExamStore()
+  const { setMode, setCertId } = useExamStore()
   const navigate = useNavigate()
 
-  // Handle domain drill from Learn page
   useEffect(() => {
+    setCertId(certId)
     const domain = params.get('domain')
     if (domain) {
       setMode('domain', domain)
-      navigate('/exam/loading', { replace: true })
+      navigate(`/${certId}/exam/loading`, { replace: true })
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <Routes>
-      <Route index element={<><TopNav /><div className="bg-navy min-h-screen"><ConfigScreen /></div></>} />
-      <Route path="loading" element={<LoadingScreen />} />
-      <Route path="question" element={<ActiveExam />} />
+      <Route index element={<><TopNav /><div className="bg-navy min-h-screen"><ConfigScreen certId={certId} /></div></>} />
+      <Route path="loading" element={<LoadingScreen certId={certId} />} />
+      <Route path="question" element={<ActiveExam certId={certId} />} />
     </Routes>
   )
 }

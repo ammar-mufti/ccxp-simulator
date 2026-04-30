@@ -1,10 +1,13 @@
 import { create } from 'zustand'
 import { getStoredToken, storeToken, clearToken, parseJwt, isTokenValid } from '../services/auth'
 
-interface AuthUser {
+export interface AuthUser {
+  id: string
   login: string
-  avatar: string
   name: string
+  email: string
+  avatar: string | null
+  provider: 'github' | 'google' | 'email'
 }
 
 interface AuthState {
@@ -12,6 +15,7 @@ interface AuthState {
   token: string | null
   isLoading: boolean
   init: () => void
+  setAuth: (user: AuthUser, token: string) => void
   setToken: (token: string) => void
   logout: () => void
 }
@@ -24,9 +28,20 @@ export const useAuthStore = create<AuthState>((set) => ({
   init() {
     const token = getStoredToken()
     if (token && isTokenValid(token)) {
-      const payload = parseJwt(token) as { login: string; avatar: string; name: string } | null
+      const payload = parseJwt(token) as AuthUser | null
       if (payload) {
-        set({ token, user: { login: payload.login, avatar: payload.avatar, name: payload.name }, isLoading: false })
+        set({
+          token,
+          user: {
+            id: payload.id ?? `legacy_${payload.login}`,
+            login: payload.login,
+            name: payload.name ?? payload.login,
+            email: payload.email ?? '',
+            avatar: payload.avatar ?? null,
+            provider: payload.provider ?? 'github',
+          },
+          isLoading: false,
+        })
         return
       }
     }
@@ -34,11 +49,26 @@ export const useAuthStore = create<AuthState>((set) => ({
     set({ isLoading: false })
   },
 
+  setAuth(user: AuthUser, token: string) {
+    storeToken(token)
+    set({ token, user })
+  },
+
   setToken(token: string) {
     storeToken(token)
-    const payload = parseJwt(token) as { login: string; avatar: string; name: string } | null
+    const payload = parseJwt(token) as AuthUser | null
     if (payload) {
-      set({ token, user: { login: payload.login, avatar: payload.avatar, name: payload.name } })
+      set({
+        token,
+        user: {
+          id: payload.id ?? `legacy_${payload.login}`,
+          login: payload.login,
+          name: payload.name ?? payload.login,
+          email: payload.email ?? '',
+          avatar: payload.avatar ?? null,
+          provider: payload.provider ?? 'github',
+        },
+      })
     }
   },
 

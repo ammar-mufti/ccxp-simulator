@@ -8,6 +8,33 @@ interface CacheEntry {
   type: string
 }
 
+function migrateLegacyCacheKeys() {
+  const legacyDomains = [
+    'CX Strategy',
+    'Customer-Centric Culture',
+    'Voice of Customer',
+    'Experience Design',
+    'Metrics & Measurement',
+    'Organizational Adoption',
+  ]
+
+  Object.keys(localStorage).forEach(key => {
+    for (const domain of legacyDomains) {
+      const legacyPrefix = `ccxp_${domain}_`
+      if (key.startsWith(legacyPrefix) && !key.startsWith('ccxp_ccxp_')) {
+        const newKey = 'ccxp_' + key
+        const value = localStorage.getItem(key)
+        if (value) {
+          localStorage.setItem(newKey, value)
+          localStorage.removeItem(key)
+        }
+      }
+    }
+  })
+}
+
+migrateLegacyCacheKeys()
+
 export const contentCache = {
   get<T>(key: string): T | null {
     try {
@@ -31,7 +58,7 @@ export const contentCache = {
     } catch {
       // localStorage full — evict oldest 3 stage entries
       const entries = Object.keys(localStorage)
-        .filter(k => k.startsWith('ccxp_') && k.includes('stage'))
+        .filter(k => k.includes('_stage'))
         .map(k => {
           try {
             const e = JSON.parse(localStorage.getItem(k) ?? '{}') as { generatedAt?: number }
@@ -48,13 +75,16 @@ export const contentCache = {
     }
   },
 
-  hasContent(domain: string): boolean {
-    return !!(localStorage.getItem(`ccxp_${domain}_stage1_summary`) && localStorage.getItem(`ccxp_${domain}_stage2_concepts`))
+  hasContent(certId: string, domain: string): boolean {
+    return !!(
+      localStorage.getItem(`${certId}_${domain}_stage1-summary`) &&
+      localStorage.getItem(`${certId}_${domain}_stage2-concepts`)
+    )
   },
 
-  getGeneratedDate(domain: string): string | null {
+  getGeneratedDate(certId: string, domain: string): string | null {
     try {
-      const raw = localStorage.getItem(`ccxp_${domain}_stage1_summary`)
+      const raw = localStorage.getItem(`${certId}_${domain}_stage1-summary`)
       if (!raw) return null
       const entry = JSON.parse(raw) as CacheEntry
       return new Date(entry.generatedAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
@@ -66,26 +96,32 @@ export const contentCache = {
   clearContent(): void {
     Object.keys(localStorage)
       .filter(k =>
-        k.startsWith('ccxp_') &&
-        k !== 'ccxp_exam_history' &&
-        !k.startsWith('ccxp_progress_') &&
-        k !== 'ccxp_exam_date' &&
-        k !== 'ccxp_plan_checks' &&
-        k !== 'ccxp_learn_progress'
+        !k.endsWith('_exam_history') &&
+        !k.includes('_learn_progress') &&
+        !k.includes('_exam_date') &&
+        !k.includes('_plan_checks') &&
+        !k.endsWith('_question_bank') &&
+        !k.endsWith('_waitlist')
       )
+      .filter(k => k.includes('_stage') || k.match(/^[a-z-]+_[^_]/))
       .forEach(k => localStorage.removeItem(k))
   },
 
-  clearDomain(domain: string): void {
+  clearCert(certId: string): void {
     Object.keys(localStorage)
-      .filter(k => k.startsWith(`ccxp_${domain}_`))
+      .filter(k => k.startsWith(`${certId}_`) && k.includes('_stage'))
+      .forEach(k => localStorage.removeItem(k))
+  },
+
+  clearDomain(certId: string, domain: string): void {
+    Object.keys(localStorage)
+      .filter(k => k.startsWith(`${certId}_${domain}_`))
       .forEach(k => localStorage.removeItem(k))
   },
 }
 
-// Legacy compat — old hooks used these named exports
 export function cacheGet<T>(key: string): T | null { return contentCache.get<T>(key) }
 export function cacheSet(key: string, data: unknown): void { contentCache.set(key, data, '', '') }
-export function cacheKey(domain: string, type: string): string {
-  return `ccxp_${domain.replace(/\s+/g, '_').toLowerCase()}_${type}`
+export function cacheKey(certId: string, domain: string, type: string): string {
+  return `${certId}_${domain}_${type}`
 }

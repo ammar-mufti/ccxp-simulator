@@ -1,11 +1,16 @@
 interface Env {
   GITHUB_CLIENT_ID: string
   GITHUB_CLIENT_SECRET: string
+  GOOGLE_CLIENT_ID: string
+  GOOGLE_CLIENT_SECRET: string
   JWT_SECRET: string
   GROQ_API_KEY: string
+  USER_KV: KVNamespace
 }
 
 const ALLOWED_ORIGINS = ['https://ammar-mufti.github.io', 'http://localhost:5173']
+const FRONTEND_URL = 'https://ammar-mufti.github.io/certpath-ai'
+const GOOGLE_REDIRECT_URI = 'https://ccxp-auth.muftiammar52.workers.dev/auth/google/callback'
 
 function corsHeaders(origin: string): Record<string, string> {
   const allowed = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0]
@@ -24,32 +29,43 @@ function jsonRes(data: unknown, status = 200, origin = '') {
   })
 }
 
+function errorRes(message: string, status: number, origin = '') {
+  return jsonRes({ error: message }, status, origin)
+}
+
 async function signJwt(payload: Record<string, unknown>, secret: string): Promise<string> {
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }))
-  const body = btoa(JSON.stringify({ ...payload, exp: Math.floor(Date.now() / 1000) + 86400 * 7 }))
-  const data = `${header}.${body}`
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const body = btoa(JSON.stringify({
+    ...payload,
+    iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60),
+  })).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+
   const key = await crypto.subtle.importKey(
     'raw', new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
   )
-  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data))
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${header}.${body}`))
   const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig)))
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
-  return `${data}.${sigB64}`
+  return `${header}.${body}.${sigB64}`
 }
 
 async function verifyJwt(token: string, secret: string): Promise<Record<string, unknown> | null> {
   try {
     const [header, body, sig] = token.split('.')
+    if (!header || !body || !sig) return null
     const data = `${header}.${body}`
     const key = await crypto.subtle.importKey(
       'raw', new TextEncoder().encode(secret),
       { name: 'HMAC', hash: 'SHA-256' }, false, ['verify'],
     )
-    const sigBytes = Uint8Array.from(atob(sig.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+    const padded = sig.replace(/-/g, '+').replace(/_/g, '/') + '=='.slice(0, (4 - sig.length % 4) % 4)
+    const sigBytes = Uint8Array.from(atob(padded), c => c.charCodeAt(0))
     const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(data))
     if (!valid) return null
-    const payload = JSON.parse(atob(body)) as Record<string, unknown>
+    const payload = JSON.parse(atob(body.replace(/-/g, '+').replace(/_/g, '/'))) as Record<string, unknown>
     if ((payload.exp as number) * 1000 < Date.now()) return null
     return payload
   } catch {
@@ -57,30 +73,29 @@ async function verifyJwt(token: string, secret: string): Promise<Record<string, 
   }
 }
 
-// Extracts JSON array or object from LLM text that may contain markdown fences or prose
+async function hashPassword(password: string, secret: string): Promise<string> {
+  const hash = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(password + secret),
+  )
+  return Array.from(new Uint8Array(hash))
+    .map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
 function extractJson(text: string, shape: 'array' | 'object'): unknown {
   if (!text || !text.trim()) throw new Error('LLM returned empty text')
-
-  // Strip markdown fences
-  let clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
-
-  // Try direct parse first (model sometimes outputs pure JSON)
+  const clean = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim()
   try { return JSON.parse(clean) } catch { /* continue */ }
-
-  // Extract by expected shape
   const pattern = shape === 'array' ? /\[[\s\S]*\]/ : /\{[\s\S]*\}/
   const match = clean.match(pattern)
   if (match) {
     try { return JSON.parse(match[0]) } catch { /* continue */ }
   }
-
-  // Try from first bracket as last resort
   const startChar = shape === 'array' ? '[' : '{'
   const idx = clean.indexOf(startChar)
   if (idx !== -1) {
     try { return JSON.parse(clean.slice(idx)) } catch { /* continue */ }
   }
-
   throw new Error(`Could not parse JSON from LLM output. Preview: ${text.slice(0, 200)}`)
 }
 
@@ -90,26 +105,18 @@ const GROQ_MODELS = [
   'mixtral-8x7b-32768',
 ]
 
-// Tries Groq models in order with exponential backoff on 429 — stops immediately on auth failure
 async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
   const cap = Math.min(maxTokens, 8192)
   let lastError = ''
 
-  console.log('GROQ KEY prefix:', env.GROQ_API_KEY?.substring(0, 10))
-  console.log('GROQ KEY length:', env.GROQ_API_KEY?.length)
-
   for (let i = 0; i < GROQ_MODELS.length; i++) {
     const model = GROQ_MODELS[i]
-
-    // Exponential backoff between attempts: 0s, 2s, 4s
     if (i > 0) {
       const waitMs = Math.pow(2, i) * 1000
-      console.log(`Waiting ${waitMs}ms before trying ${model}...`)
       await new Promise(r => setTimeout(r, waitMs))
     }
 
     try {
-      console.log(`Trying Groq model: ${model}`)
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
@@ -121,72 +128,34 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
         }),
       })
 
-      console.log(`Groq ${model} status:`, res.status)
-
       if (res.status === 401 || res.status === 403) {
         const errorBody = await res.text()
-        throw new Error(
-          `Groq key invalid (${res.status}). Key prefix: ${env.GROQ_API_KEY?.substring(0, 8)}. Error: ${errorBody}`
-        )
+        throw new Error(`Groq key invalid (${res.status}). Error: ${errorBody}`)
       }
 
       if (res.status === 429) {
         const retryAfter = res.headers.get('retry-after')
         const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 3000
-        console.log(`${model} rate limited. Retry-After: ${retryAfter ?? 'not set'}, waiting ${waitMs}ms`)
         lastError = `${model} rate limited`
         if (waitMs > 0 && waitMs < 15000) await new Promise(r => setTimeout(r, waitMs))
         continue
       }
 
-      if (res.status === 400) {
-        console.warn(`${model} bad request — skipping`)
-        lastError = `${model} HTTP 400`
-        continue
-      }
-
-      if (!res.ok) {
-        lastError = `${model} HTTP ${res.status}`
-        continue
-      }
+      if (res.status === 400) { lastError = `${model} HTTP 400`; continue }
+      if (!res.ok) { lastError = `${model} HTTP ${res.status}`; continue }
 
       const data = await res.json() as { choices?: Array<{ message?: { content?: string } }>; error?: { message: string } }
       const text = data.choices?.[0]?.message?.content ?? ''
-
-      if (!text.trim()) {
-        lastError = `${model} returned empty response`
-        continue
-      }
-
-      console.log(`Success with model: ${model}`)
+      if (!text.trim()) { lastError = `${model} returned empty response`; continue }
       return text
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('key invalid')) throw err
       lastError = msg
-      console.error(`${model} failed:`, err)
     }
   }
 
   throw new Error(`All Groq models failed. Last error: ${lastError}`)
-}
-
-const DOMAIN_TOPIC_MAP: Record<string, string[]> = {
-  'CX Strategy': ['CX Vision & Mission', 'Business Case for CX', 'CX Maturity Models', 'CX Governance & Ownership', 'CX Roadmap & Prioritization', 'Aligning CX to Corporate Strategy'],
-  'Customer-Centric Culture': ['Culture Change Management', 'Leadership Buy-in & Sponsorship', 'Employee Engagement in CX', 'CX Champions Network', 'Embedding CX Behaviors'],
-  'Voice of Customer': ['VoC Program Design', 'Listening Post Strategy', 'Quantitative vs Qualitative Research', 'Customer Journey Analytics', 'Insight Generation & Storytelling', 'Closing the Feedback Loop'],
-  'Experience Design': ['Customer Journey Mapping', 'Service Design Principles', 'Design Thinking Process', 'Moments of Truth', 'Prototyping & Testing', 'Innovation in CX'],
-  'Metrics & Measurement': ['NPS CSAT CES Explained', 'Linking CX to Business Outcomes', 'Building a CX Dashboard', 'Statistical Concepts for CX', 'ROI Calculation Methods'],
-  'Organizational Adoption': ['Change Management for CX', 'Cross-functional Alignment', 'CX Roles & Responsibilities', 'Governance Structures', 'Sustaining CX Momentum'],
-}
-
-const DOMAIN_WEIGHTS_MAP: Record<string, string> = {
-  'CX Strategy': '20 questions — 20% of exam',
-  'Customer-Centric Culture': '17 questions — 17% of exam',
-  'Voice of Customer': '20 questions — 20% of exam',
-  'Experience Design': '18 questions — 18% of exam',
-  'Metrics & Measurement': '15 questions — 15% of exam',
-  'Organizational Adoption': '10 questions — 10% of exam',
 }
 
 export default {
@@ -198,16 +167,18 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) })
     }
 
+    // ── GitHub OAuth ──────────────────────────────────────────────────────────
+
     if (url.pathname === '/auth/github/login') {
       return Response.redirect(
-        `https://github.com/login/oauth/authorize?client_id=${env.GITHUB_CLIENT_ID}&scope=read:user`,
-        302
+        `https://github.com/login/oauth/authorize?client_id=${env.GITHUB_CLIENT_ID}&scope=read:user user:email`,
+        302,
       )
     }
 
     if (url.pathname === '/auth/github/callback') {
       const code = url.searchParams.get('code')
-      if (!code) return jsonRes({ error: 'No code' }, 400, origin)
+      if (!code) return errorRes('No code', 400, origin)
 
       const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
         method: 'POST',
@@ -215,18 +186,164 @@ export default {
         body: JSON.stringify({ client_id: env.GITHUB_CLIENT_ID, client_secret: env.GITHUB_CLIENT_SECRET, code }),
       })
       const tokenData = await tokenRes.json() as { access_token?: string }
-      if (!tokenData.access_token) return jsonRes({ error: 'Token exchange failed' }, 400, origin)
+      if (!tokenData.access_token) return errorRes('Token exchange failed', 400, origin)
 
       const userRes = await fetch('https://api.github.com/user', {
-        headers: { Authorization: `Bearer ${tokenData.access_token}`, 'User-Agent': 'ccxp-auth-worker' },
+        headers: { Authorization: `Bearer ${tokenData.access_token}`, 'User-Agent': 'certpath-ai-worker' },
       })
-      const user = await userRes.json() as { login: string; avatar_url: string; name: string }
-      const jwt = await signJwt({ login: user.login, avatar: user.avatar_url, name: user.name ?? user.login }, env.JWT_SECRET)
+      const ghUser = await userRes.json() as { id: number; login: string; avatar_url: string; name: string; email: string | null }
 
-      return Response.redirect(`https://ammar-mufti.github.io/ccxp-simulator/login?token=${jwt}`, 302)
+      // Fetch email if not public
+      let email = ghUser.email
+      if (!email) {
+        const emailRes = await fetch('https://api.github.com/user/emails', {
+          headers: { Authorization: `Bearer ${tokenData.access_token}`, 'User-Agent': 'certpath-ai-worker' },
+        })
+        const emails = await emailRes.json() as Array<{ email: string; primary: boolean }>
+        email = emails.find(e => e.primary)?.email ?? ''
+      }
+
+      const jwt = await signJwt({
+        id: `github_${ghUser.id}`,
+        login: ghUser.login,
+        name: ghUser.name ?? ghUser.login,
+        email: email ?? '',
+        avatar: ghUser.avatar_url,
+        provider: 'github',
+      }, env.JWT_SECRET)
+
+      return Response.redirect(`${FRONTEND_URL}/login?token=${jwt}`, 302)
     }
 
-    // Health check — no auth required, uses /models (no token cost)
+    // ── Google OAuth ──────────────────────────────────────────────────────────
+
+    if (url.pathname === '/auth/google/login') {
+      const params = new URLSearchParams({
+        client_id: env.GOOGLE_CLIENT_ID,
+        redirect_uri: GOOGLE_REDIRECT_URI,
+        response_type: 'code',
+        scope: 'openid email profile',
+        access_type: 'offline',
+        state: crypto.randomUUID(),
+      })
+      return Response.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, 302)
+    }
+
+    if (url.pathname === '/auth/google/callback') {
+      const code = url.searchParams.get('code')
+      if (!code) return errorRes('No code', 400, origin)
+
+      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          client_id: env.GOOGLE_CLIENT_ID,
+          client_secret: env.GOOGLE_CLIENT_SECRET,
+          redirect_uri: GOOGLE_REDIRECT_URI,
+          grant_type: 'authorization_code',
+        }),
+      })
+      const tokenData = await tokenRes.json() as { access_token?: string; error?: string }
+      if (!tokenData.access_token) return errorRes('Google token exchange failed', 400, origin)
+
+      const profileRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+      })
+      const profile = await profileRes.json() as {
+        sub: string; email: string; name: string; picture: string
+      }
+
+      const jwt = await signJwt({
+        id: `google_${profile.sub}`,
+        login: profile.email.split('@')[0],
+        name: profile.name,
+        email: profile.email,
+        avatar: profile.picture,
+        provider: 'google',
+      }, env.JWT_SECRET)
+
+      return Response.redirect(`${FRONTEND_URL}/login?token=${jwt}`, 302)
+    }
+
+    // ── Email auth ────────────────────────────────────────────────────────────
+
+    if (url.pathname === '/auth/email/register' && request.method === 'POST') {
+      let body: { email?: string; password?: string; name?: string }
+      try { body = await request.json() } catch { return errorRes('Invalid JSON', 400, origin) }
+
+      const { email = '', password = '', name = '' } = body
+
+      if (!email.includes('@') || !email.includes('.')) return errorRes('Invalid email address', 400, origin)
+      if (password.length < 8) return errorRes('Password must be at least 8 characters', 400, origin)
+      if (!/\d/.test(password)) return errorRes('Password must contain at least one number', 400, origin)
+      if (name.trim().length < 2) return errorRes('Please enter your full name', 400, origin)
+
+      const existing = await env.USER_KV.get(`user_${email.toLowerCase()}`)
+      if (existing) return errorRes('Email already registered', 409, origin)
+
+      const passwordHash = await hashPassword(password, env.JWT_SECRET)
+      await env.USER_KV.put(
+        `user_${email.toLowerCase()}`,
+        JSON.stringify({ name: name.trim(), email: email.toLowerCase(), passwordHash, createdAt: new Date().toISOString() }),
+      )
+
+      const user = {
+        id: `email_${email.replace(/[@.]/g, '_')}`,
+        login: email.split('@')[0],
+        name: name.trim(),
+        email: email.toLowerCase(),
+        avatar: null,
+        provider: 'email',
+      }
+      const token = await signJwt(user, env.JWT_SECRET)
+      return jsonRes({ token, user }, 200, origin)
+    }
+
+    if (url.pathname === '/auth/email/login' && request.method === 'POST') {
+      let body: { email?: string; password?: string }
+      try { body = await request.json() } catch { return errorRes('Invalid JSON', 400, origin) }
+
+      const { email = '', password = '' } = body
+      if (!email || !password) return errorRes('Email and password are required', 400, origin)
+
+      const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'
+      const attemptKey = `failed_${ip}_${email.toLowerCase()}`
+      const attempts = parseInt(await env.USER_KV.get(attemptKey) ?? '0')
+
+      if (attempts >= 5) {
+        return errorRes('Too many failed attempts. Try again in 15 minutes.', 429, origin)
+      }
+
+      const stored = await env.USER_KV.get(`user_${email.toLowerCase()}`)
+      if (!stored) {
+        await env.USER_KV.put(attemptKey, String(attempts + 1), { expirationTtl: 900 })
+        return errorRes('Invalid email or password', 401, origin)
+      }
+
+      const userData = JSON.parse(stored) as { name: string; email: string; passwordHash: string }
+      const passwordHash = await hashPassword(password, env.JWT_SECRET)
+
+      if (passwordHash !== userData.passwordHash) {
+        await env.USER_KV.put(attemptKey, String(attempts + 1), { expirationTtl: 900 })
+        return errorRes('Invalid email or password', 401, origin)
+      }
+
+      await env.USER_KV.delete(attemptKey)
+      const user = {
+        id: `email_${email.replace(/[@.]/g, '_')}`,
+        login: userData.name.split(' ')[0].toLowerCase(),
+        name: userData.name,
+        email: userData.email,
+        avatar: null,
+        provider: 'email',
+      }
+      const token = await signJwt(user, env.JWT_SECRET)
+      return jsonRes({ token, user }, 200, origin)
+    }
+
+    // ── Health check ──────────────────────────────────────────────────────────
+
     if (url.pathname === '/api/health' && request.method === 'GET') {
       const keyPrefix = env.GROQ_API_KEY?.substring(0, 8) ?? 'missing'
       const keyLength = env.GROQ_API_KEY?.length ?? 0
@@ -234,10 +351,9 @@ export default {
         const res = await fetch('https://api.groq.com/openai/v1/models', {
           headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
         })
-        const isValid = res.ok
         return jsonRes({
-          status: isValid ? 'healthy' : 'unhealthy',
-          groq: isValid ? 'connected' : 'key invalid',
+          status: res.ok ? 'healthy' : 'unhealthy',
+          groq: res.ok ? 'connected' : 'key invalid',
           keyPrefix,
           keyLength,
           timestamp: new Date().toISOString(),
@@ -247,7 +363,6 @@ export default {
       }
     }
 
-    // Public test endpoint — checks Groq key without requiring JWT
     if (url.pathname === '/api/test-groq' && request.method === 'GET') {
       const keyPrefix = env.GROQ_API_KEY?.substring(0, 8) ?? 'MISSING'
       const keyLength = env.GROQ_API_KEY?.length ?? 0
@@ -268,15 +383,24 @@ export default {
       }
     }
 
+    // ── LLM API (protected) ───────────────────────────────────────────────────
+
     if (url.pathname === '/api/llm' && request.method === 'POST') {
       const authHeader = request.headers.get('Authorization') ?? ''
       const token = authHeader.replace('Bearer ', '')
       const payload = await verifyJwt(token, env.JWT_SECRET)
-      if (!payload) return jsonRes({ error: 'Unauthorized' }, 401, origin)
+      if (!payload) return errorRes('Unauthorized', 401, origin)
 
       let body: {
         type: string
         domain: string
+        certId?: string
+        certName?: string
+        certFullName?: string
+        certIssuer?: string
+        passingScore?: number
+        difficulty?: string
+        examQuestions?: number
         count?: number
         extra?: string
         topics?: string[]
@@ -293,17 +417,26 @@ export default {
       try {
         body = await request.json()
       } catch {
-        return jsonRes({ error: 'Invalid JSON body' }, 400, origin)
+        return errorRes('Invalid JSON body', 400, origin)
       }
 
-      // ── STAGE 1: Domain snapshot ─────────────────────────────────────────
+      const certName = body.certName ?? 'CCXP'
+      const certFullName = body.certFullName ?? 'Certified Customer Experience Professional'
+      const certIssuer = body.certIssuer ?? 'CXPA'
+      const passingScore = body.passingScore ?? 70
+      const difficulty = body.difficulty ?? 'Advanced'
+      const examQuestions = body.examQuestions ?? 100
+
+      // ── STAGE 1: Domain snapshot ──────────────────────────────────────────
       if (body.type === 'stage1-summary') {
-        const prompt = `You are a CCXP exam coach. Give a concise exam-focused summary of domain: "${body.domain}" for someone sitting the exam this Saturday.
+        const prompt = `You are a ${certName} exam coach. Give a concise exam-focused summary of the domain: "${body.domain}" for the ${certName} certification issued by ${certIssuer}.
+
+The candidate is sitting this exam soon. Focus on what the exam tests in this domain.
 
 Output ONLY this JSON object — no markdown, no explanation:
 {
-  "tagline": "One sentence describing this domain purpose",
-  "examWeight": "${DOMAIN_WEIGHTS_MAP[body.domain] ?? ''}",
+  "tagline": "One sentence describing this domain purpose for ${certName}",
+  "examWeight": "X questions — X% of exam",
   "mustKnow": [
     "Specific fact 1 with framework or model name",
     "Specific fact 2",
@@ -333,14 +466,12 @@ Output ONLY this JSON object — no markdown, no explanation:
 
       // ── STAGE 2: Key concepts ─────────────────────────────────────────────
       if (body.type === 'stage2-concepts') {
-        const topics = body.topics ?? DOMAIN_TOPIC_MAP[body.domain] ?? []
-
-        // Split into 2 batches to stay within token limits
+        const topics = body.topics ?? []
         const half = Math.ceil(topics.length / 2)
         const batches = [topics.slice(0, half), topics.slice(half)].filter(b => b.length > 0)
 
-        const buildPrompt = (batch: string[]) =>
-          `You are a CCXP exam coach writing structured study material.
+        const buildBatchPrompt = (batch: string[]) =>
+          `You are a ${certName} exam coach writing structured study material for the ${certName} certification exam.
 Generate key concepts for domain: "${body.domain}".
 Topics: ${batch.join(', ')}
 
@@ -351,8 +482,8 @@ Output ONLY a raw JSON array with exactly ${batch.length} objects — no markdow
     "summary": "One sentence what this concept is",
     "bullets": [
       "Specific key point with framework/model name if relevant",
-      "Practical CX application",
-      "Connection to other CCXP concepts",
+      "Practical application",
+      "Connection to other ${certName} concepts",
       "What the exam specifically tests here"
     ],
     "examTip": "The specific wrong answer pattern to avoid",
@@ -364,7 +495,7 @@ Output ONLY a raw JSON array with exactly ${batch.length} objects — no markdow
 
         try {
           const results = await Promise.all(
-            batches.map(batch => llm(buildPrompt(batch), env, 4096))
+            batches.map(batch => llm(buildBatchPrompt(batch), env, 4096)),
           )
           const parsed = results.flatMap(raw => {
             const arr = extractJson(raw, 'array')
@@ -380,9 +511,10 @@ Output ONLY a raw JSON array with exactly ${batch.length} objects — no markdow
 
       // ── STAGE 3: Deep dive ────────────────────────────────────────────────
       if (body.type === 'stage3-deepdive') {
-        const prompt = `You are a CCXP exam coach. Write a comprehensive deep dive on:
+        const prompt = `You are a ${certName} exam coach. Write a comprehensive deep dive on:
 Topic: "${body.topic}"
 Domain: "${body.domain}"
+Certification: ${certName} (${certFullName}) issued by ${certIssuer}
 
 Output ONLY this JSON object — no markdown, no explanation:
 {
@@ -396,7 +528,7 @@ Output ONLY this JSON object — no markdown, no explanation:
   "realWorldExample": {
     "scenario": "Specific company or industry scenario (3-4 sentences)",
     "application": "How this topic applies in that scenario",
-    "outcome": "What good CX looks like as a result"
+    "outcome": "What good practice looks like as a result"
   },
   "examScenario": {
     "question": "An exam-style scenario question about this topic",
@@ -425,8 +557,9 @@ Output ONLY this JSON object — no markdown, no explanation:
 
       // ── STAGE 4: Practice quiz ────────────────────────────────────────────
       if (body.type === 'stage4-quiz') {
-        const prompt = `Generate exactly 5 practice questions for CCXP domain: "${body.domain}".
-Rules: educational explanations (2-3 sentences), all 4 options plausible, vary types.
+        const prompt = `Generate exactly 5 practice questions for ${certName} domain: "${body.domain}".
+Certification: ${certName} issued by ${certIssuer}. Pass mark: ${passingScore}%.
+Rules: educational explanations (2-3 sentences), all 4 options plausible, vary question types.
 
 Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanation:
 [
@@ -454,12 +587,10 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
 
       // ── Tutor chat ────────────────────────────────────────────────────────
       if (body.type === 'tutor-chat') {
-        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and **bold** for key terms, give mnemonics when helpful, keep responses under 200 words unless detail is needed.`
+        const systemPrompt = body.systemPrompt ?? `You are an expert ${certName} exam coach helping a professional prepare for the ${certFullName} certification issued by ${certIssuer}. Pass mark: ${passingScore}%. Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and **bold** for key terms, give mnemonics when helpful, keep responses under 200 words unless detail is needed.`
 
         const messages = (body.messages ?? []).slice(-10)
         const groqMessages = [{ role: 'system', content: systemPrompt }, ...messages]
-
-        console.log('Tutor chat: messages count:', messages.length, '| context:', body.pageContext ?? 'none')
 
         let response = ''
         let lastError = ''
@@ -468,7 +599,6 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
           const model = GROQ_MODELS[i]
           if (i > 0) {
             const waitMs = Math.pow(2, i) * 1000
-            console.log(`Tutor waiting ${waitMs}ms before trying ${model}...`)
             await new Promise(r => setTimeout(r, waitMs))
           }
 
@@ -478,7 +608,6 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
               body: JSON.stringify({ model, messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
             })
-            console.log(`Tutor ${model} status:`, res.status)
 
             if (res.status === 401 || res.status === 403) {
               const errBody = await res.text()
@@ -487,51 +616,39 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
             if (res.status === 429) {
               const retryAfter = res.headers.get('retry-after')
               const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 3000
-              console.log(`Tutor ${model} rate limited. Waiting ${waitMs}ms`)
               lastError = `${model} rate limited`
               if (waitMs > 0 && waitMs < 15000) await new Promise(r => setTimeout(r, waitMs))
               continue
             }
-            if (res.status === 400) {
-              lastError = `${model} HTTP 400`; continue
-            }
-            if (!res.ok) {
-              lastError = `${model} HTTP ${res.status}`; continue
-            }
+            if (res.status === 400) { lastError = `${model} HTTP 400`; continue }
+            if (!res.ok) { lastError = `${model} HTTP ${res.status}`; continue }
 
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }
             response = data.choices?.[0]?.message?.content ?? ''
-            if (response.trim()) {
-              console.log(`Tutor success with ${model}, reply length:`, response.length)
-              break
-            }
+            if (response.trim()) break
             lastError = `${model} empty response`
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
-            if (msg.includes('key invalid')) {
-              return jsonRes({ error: msg }, 500, origin)
-            }
+            if (msg.includes('key invalid')) return jsonRes({ error: msg }, 500, origin)
             lastError = msg
-            console.error(`Tutor ${model} failed:`, msg)
           }
         }
 
         if (!response.trim()) {
-          console.error('Tutor: all models failed, last error:', lastError)
           return jsonRes({ error: `Tutor unavailable: ${lastError}` }, 500, origin)
         }
 
         return jsonRes({ response }, 200, origin)
       }
 
-      // ── Explain question ─────────────────────────────────────────────────
+      // ── Explain question ──────────────────────────────────────────────────
       if (body.type === 'explain-question') {
         const optLabels: Record<string, string> = { a: body.a ?? '', b: body.b ?? '', c: body.c ?? '', d: body.d ?? '' }
         const correctText = optLabels[body.correct ?? ''] ?? ''
         const userText = optLabels[body.userAnswer ?? ''] ?? ''
         const wasCorrect = body.userAnswer === body.correct
 
-        const prompt = `A CCXP candidate answered this question.
+        const prompt = `A ${certName} candidate answered this question.
 
 Question: ${body.question}
 A: ${body.a}  B: ${body.b}  C: ${body.c}  D: ${body.d}
@@ -544,7 +661,7 @@ Explain in 3 parts:
 **Why the others are wrong:** ${['a','b','c','d'].filter(o => o !== body.correct).map(o => `(${o.toUpperCase()}) one sentence`).join(', ')}
 **💡 Exam Tip:** [one memory tip]
 
-Under 150 words. Bold key CX terms. Domain: ${body.domain}`
+Under 150 words. Bold key terms. Domain: ${body.domain}`
 
         try {
           const raw = await llm(prompt, env, 512)
@@ -559,7 +676,8 @@ Under 150 words. Bold key CX terms. Domain: ${body.domain}`
       if (body.type === 'generate-questions') {
         const prompt = body.extra && body.extra.length > 100
           ? body.extra
-          : `Generate ${body.count ?? 5} CCXP exam questions for domain: "${body.domain}".
+          : `Generate ${body.count ?? 5} ${certName} exam questions for domain: "${body.domain}".
+Certification: ${certName} (${certFullName}) issued by ${certIssuer}. Pass: ${passingScore}%.
 Output ONLY a raw JSON array:
 [{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"max 25 words","sourceTopic":"topic","sourceTopicSlug":"kebab-case"}]`
 
@@ -575,7 +693,7 @@ Output ONLY a raw JSON array:
 
       // ── Study plan ────────────────────────────────────────────────────────
       if (body.type === 'study-plan') {
-        const prompt = `CCXP study tips for weakest domains: ${body.domain}.
+        const prompt = `${certName} study tips for weakest domains: ${body.domain}.
 Generate 3 tips per domain.
 Output ONLY raw JSON array:
 [{"domain":"...","tips":["tip1","tip2","tip3"]}]`
@@ -595,18 +713,17 @@ Output ONLY raw JSON array:
         const maxTok = extra === 'topics' ? 4000 : 2048
         let prompt = ''
         if (extra === 'overview') {
-          prompt = `Write a study overview for CCXP domain: "${body.domain}". Max 220 words. Plain text.`
+          prompt = `Write a study overview for ${certName} domain: "${body.domain}". Max 220 words. Plain text.`
         } else if (extra === 'topics') {
-          const topics = DOMAIN_TOPIC_MAP[body.domain] ?? []
-          prompt = `Generate study content for ${topics.length} topics in domain: "${body.domain}". Topics: ${topics.join(', ')}
+          prompt = `Generate study content for ${certName} domain: "${body.domain}" topics.
 Output ONLY raw JSON array:
 [{"topic":"...","explanation":"150 words","example":"2-3 sentences","examTrap":"one sentence","keyTerms":[{"term":"...","definition":"..."}]}]`
         } else if (extra === 'flashcards') {
-          prompt = `Generate 10 flashcards for CCXP domain: "${body.domain}".
+          prompt = `Generate 10 flashcards for ${certName} domain: "${body.domain}".
 Output ONLY raw JSON array:
 [{"front":"max 20 words","back":"max 40 words","why":"one sentence"}]`
         } else if (extra === 'quiz') {
-          prompt = `Generate 5 practice questions for CCXP domain: "${body.domain}".
+          prompt = `Generate 5 practice questions for ${certName} domain: "${body.domain}".
 Output ONLY raw JSON array:
 [{"q":"...","a":"...","b":"...","c":"...","d":"...","correct":"b","explanation":"2-3 sentences"}]`
         }
@@ -622,9 +739,9 @@ Output ONLY raw JSON array:
         }
       }
 
-      return jsonRes({ error: 'Unknown request type' }, 400, origin)
+      return errorRes('Unknown request type', 400, origin)
     }
 
-    return jsonRes({ status: 'ccxp-auth worker running' }, 200, origin)
+    return jsonRes({ status: 'certpath-ai worker running' }, 200, origin)
   },
 } satisfies ExportedHandler<Env>

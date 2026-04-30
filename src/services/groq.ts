@@ -3,6 +3,13 @@ export interface LLMPayload {
   domain: string
   count?: number
   extra?: string
+  certId?: string
+  certName?: string
+  certFullName?: string
+  certIssuer?: string
+  passingScore?: number
+  difficulty?: string
+  examQuestions?: number
 }
 
 export async function callLLM(payload: LLMPayload, token: string): Promise<unknown> {
