@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useTutorStore } from '../../store/tutorStore'
 import { useAuthStore } from '../../store/authStore'
@@ -30,7 +30,6 @@ function usePageContext() {
   const location = useLocation()
   const { questions, answers, submitted } = useExamStore()
 
-  // Extract domain from path manually — useParams only works inside a Route
   const domainFromPath = location.pathname.includes('/learn/')
     ? decodeURIComponent(location.pathname.split('/learn/')[1]?.split('/')[0] ?? '')
     : ''
@@ -81,6 +80,9 @@ export default function TutorChat() {
   const token = useAuthStore(s => s.token) ?? ''
   const pageContext = usePageContext()
   const [input, setInput] = useState('')
+  const [failedMessage, setFailedMessage] = useState<string | null>(null)
+  const [retryCount, setRetryCount] = useState(0)
+  const autoRetryRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
 
@@ -90,45 +92,91 @@ export default function TutorChat() {
   // Scroll to bottom on new messages
   useEffect(() => {
     if (isOpen) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, isLoading, isOpen])
+  }, [messages, isLoading, isOpen, failedMessage])
 
   // Focus input when opened
   useEffect(() => {
     if (isOpen) setTimeout(() => inputRef.current?.focus(), 100)
   }, [isOpen])
 
+  // Clear auto-retry timer on unmount
+  useEffect(() => () => { if (autoRetryRef.current) clearTimeout(autoRetryRef.current) }, [])
+
+  const callWorker = useCallback(async (content: string) => {
+    const res = await fetch(`${WORKER_URL}/api/llm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        type: 'tutor-chat',
+        domain: '',
+        messages: [...messages, { role: 'user', content }],
+        pageContext,
+      }),
+    })
+    const data = await res.json() as { response?: string; error?: string }
+    if (!res.ok || data.error) {
+      throw new Error(data.error ?? `Server error (${res.status})`)
+    }
+    return data.response?.trim() || 'Sorry, I could not generate a response.'
+  }, [messages, pageContext, token])
+
   async function send(text: string) {
     const content = text.trim()
     if (!content || isLoading) return
     setInput('')
+    // Clear any existing error state before new send
+    setFailedMessage(null)
+    if (autoRetryRef.current) clearTimeout(autoRetryRef.current)
     addMessage('user', content)
     setLoading(true)
 
     try {
-      const res = await fetch(`${WORKER_URL}/api/llm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          type: 'tutor-chat',
-          domain: '',
-          messages: [...messages, { role: 'user', content }],
-          pageContext,
-        }),
-      })
-      const data = await res.json() as { response?: string; error?: string }
-      if (!res.ok || data.error) {
-        const msg = data.error ?? `Server error (${res.status})`
-        console.error('[TutorChat] error:', msg)
-        addMessage('assistant', `I'm temporarily unavailable — ${msg}. Please try again shortly.`)
-        return
-      }
-      addMessage('assistant', data.response?.trim() || 'Sorry, I could not generate a response.')
+      const response = await callWorker(content)
+      addMessage('assistant', response)
     } catch (err) {
-      console.error('[TutorChat] fetch failed:', err)
-      addMessage('assistant', 'Could not reach the server — check your connection and try again.')
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      console.error('[TutorChat] error:', msg)
+      setFailedMessage(content)
+      setRetryCount(0)
+      // Auto-retry once after 3 seconds on first failure
+      autoRetryRef.current = setTimeout(() => {
+        console.log('[TutorChat] auto-retrying...')
+        doRetry(content, 0)
+      }, 3000)
     } finally {
       setLoading(false)
     }
+  }
+
+  async function doRetry(content: string, currentCount: number) {
+    if (!content || isLoading) return
+    if (autoRetryRef.current) clearTimeout(autoRetryRef.current)
+    setRetryCount(currentCount + 1)
+    setLoading(true)
+
+    try {
+      const response = await callWorker(content)
+      addMessage('assistant', response)
+      setFailedMessage(null)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unknown error'
+      console.error('[TutorChat] retry failed:', msg)
+      setRetryCount(currentCount + 1)
+      // Keep failedMessage set so the error UI stays visible
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  function handleRetry() {
+    if (!failedMessage) return
+    doRetry(failedMessage, retryCount)
+  }
+
+  function handleDismiss() {
+    if (autoRetryRef.current) clearTimeout(autoRetryRef.current)
+    setFailedMessage(null)
+    setRetryCount(0)
   }
 
   function handleKey(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -138,7 +186,6 @@ export default function TutorChat() {
     }
   }
 
-  // Get the domain color for the current domain context if on a domain page
   const domainMatch = pageContext.match(/"([^"]+)" domain/)
   const accentColor = domainMatch ? (DOMAIN_COLORS[domainMatch[1]] ?? '#C9A84C') : '#C9A84C'
 
@@ -165,14 +212,24 @@ export default function TutorChat() {
                 <div className="text-mist text-xs truncate max-w-[220px]">{pageContext.split('.')[0]}</div>
               </div>
             </div>
-            <button onClick={clearHistory} className="text-mist/50 hover:text-mist text-xs transition-colors" title="Clear history">
-              Clear
-            </button>
+            <div className="flex items-center gap-3">
+              {failedMessage && !isLoading && (
+                <button
+                  onClick={handleRetry}
+                  className="text-xs text-gold hover:text-amber-400 flex items-center gap-1 transition-colors"
+                >
+                  ↺ Retry
+                </button>
+              )}
+              <button onClick={clearHistory} className="text-mist/50 hover:text-mist text-xs transition-colors" title="Clear history">
+                Clear
+              </button>
+            </div>
           </div>
 
           {/* Messages */}
           <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-            {messages.length === 0 && (
+            {messages.length === 0 && !failedMessage && (
               <div>
                 <p className="text-mist text-sm mb-4 text-center">Ask me anything about the CCXP exam</p>
                 <div className="space-y-2">
@@ -206,10 +263,51 @@ export default function TutorChat() {
               </div>
             ))}
 
+            {/* Error bubble with retry — rendered after messages, not stored in store */}
+            {failedMessage && !isLoading && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] bg-red-500/10 border border-red-500/20 rounded-2xl rounded-bl-sm px-4 py-3">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <span className="text-red-400 text-xs">⚠</span>
+                    <span className="text-red-400 text-xs font-medium">Failed to get response</span>
+                  </div>
+                  <p className="text-mist/70 text-xs mb-3 leading-relaxed">
+                    Your message: "<span className="text-mist">{failedMessage}</span>"
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleRetry}
+                      disabled={isLoading}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-gold text-navy text-xs font-semibold rounded-lg hover:bg-amber-400 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      ↺ Retry
+                    </button>
+                    <button
+                      onClick={handleDismiss}
+                      className="px-3 py-1.5 text-xs text-mist hover:text-cream transition-colors"
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                  {retryCount > 0 && (
+                    <p className="text-mist/40 text-xs mt-2">
+                      Retried {retryCount} time{retryCount !== 1 ? 's' : ''}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {isLoading && (
               <div className="flex justify-start">
                 <div className="bg-ink border border-white/10 rounded-2xl rounded-bl-sm">
-                  <TypingDots />
+                  {failedMessage
+                    ? <div className="flex items-center gap-2 px-4 py-3 text-xs text-mist">
+                        <span className="w-3 h-3 border border-mist/30 border-t-mist rounded-full animate-spin flex-shrink-0" />
+                        Retrying…
+                      </div>
+                    : <TypingDots />
+                  }
                 </div>
               </div>
             )}
