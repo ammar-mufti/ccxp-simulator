@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { contentCache } from '../services/contentCache'
+import { requestQueue } from '../services/requestQueue'
 import { useAuthStore } from '../store/authStore'
 import { DOMAIN_TOPICS, toTopicSlug } from '../utils/domainUtils'
 
@@ -48,21 +49,23 @@ export function useStageContent<T>(domain: string, stage: Stage, options?: Optio
         requestBody.topic = options?.topic
       }
 
-      const res = await fetch(`${workerUrl}/api/llm`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify(requestBody),
+      const result = await requestQueue.add(async () => {
+        const res = await fetch(`${workerUrl}/api/llm`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify(requestBody),
+        })
+        if (!res.ok) {
+          const text = await res.text()
+          throw new Error(`Worker error ${res.status}: ${text}`)
+        }
+        return res.json() as Promise<{ data?: T; error?: string }>
       })
 
-      if (!res.ok) {
-        const text = await res.text()
-        throw new Error(`Worker error ${res.status}: ${text}`)
-      }
-
-      const result = await res.json() as { data?: T; error?: string }
       if (result.error) throw new Error(result.error)
       const content = result.data ?? (result as unknown as T)
 
+      // Only cache on success — errors must never be stored
       contentCache.set(cacheKey, content, domain, stage)
       setData(content)
     } catch (err) {

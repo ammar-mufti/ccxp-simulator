@@ -28,12 +28,23 @@ function Skeleton({ lines = 4 }: { lines?: number }) {
 }
 
 function ErrorRetry({ message, onRetry }: { message: string; onRetry: () => void }) {
+  const isRateLimit = message.includes('rate') || message.includes('429')
+  const isAuthError = message.includes('key') || message.includes('403') || message.includes('401')
+  const hint = isRateLimit
+    ? 'Groq API is rate limited — wait a few seconds then retry. This can happen when multiple topics load at once.'
+    : isAuthError
+    ? 'API key issue — try refreshing the page. If it persists, contact support.'
+    : null
+
   return (
-    <div className="bg-fail/10 border border-fail/30 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
-      <p className="text-fail text-sm">{message}</p>
-      <button onClick={onRetry} className="bg-gold text-navy font-bold px-4 py-1.5 rounded-lg text-sm flex-shrink-0 hover:bg-amber-400 transition-colors">
-        Retry
-      </button>
+    <div className="bg-fail/10 border border-fail/30 rounded-xl px-4 py-3 space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-fail text-sm">⚠ Failed to load</p>
+        <button onClick={onRetry} className="bg-gold text-navy font-bold px-4 py-1.5 rounded-lg text-sm flex-shrink-0 hover:bg-amber-400 transition-colors">
+          ↺ Retry
+        </button>
+      </div>
+      <p className="text-mist text-xs">{hint ?? message}</p>
     </div>
   )
 }

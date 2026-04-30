@@ -84,21 +84,30 @@ function extractJson(text: string, shape: 'array' | 'object'): unknown {
   throw new Error(`Could not parse JSON from LLM output. Preview: ${text.slice(0, 200)}`)
 }
 
-// Tries 4 Groq models in order — stops immediately on auth failure
+const GROQ_MODELS = [
+  'llama-3.3-70b-versatile',
+  'llama-3.1-8b-instant',
+  'mixtral-8x7b-32768',
+]
+
+// Tries Groq models in order with exponential backoff on 429 — stops immediately on auth failure
 async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> {
   const cap = Math.min(maxTokens, 8192)
-  const models = [
-    'llama-3.3-70b-versatile',
-    'llama-3.1-8b-instant',
-    'mixtral-8x7b-32768',
-    'gemma2-9b-it',
-  ]
   let lastError = ''
 
   console.log('GROQ KEY prefix:', env.GROQ_API_KEY?.substring(0, 10))
   console.log('GROQ KEY length:', env.GROQ_API_KEY?.length)
 
-  for (const model of models) {
+  for (let i = 0; i < GROQ_MODELS.length; i++) {
+    const model = GROQ_MODELS[i]
+
+    // Exponential backoff between attempts: 0s, 2s, 4s
+    if (i > 0) {
+      const waitMs = Math.pow(2, i) * 1000
+      console.log(`Waiting ${waitMs}ms before trying ${model}...`)
+      await new Promise(r => setTimeout(r, waitMs))
+    }
+
     try {
       console.log(`Trying Groq model: ${model}`)
       const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -122,8 +131,17 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
       }
 
       if (res.status === 429) {
+        const retryAfter = res.headers.get('retry-after')
+        const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 3000
+        console.log(`${model} rate limited. Retry-After: ${retryAfter ?? 'not set'}, waiting ${waitMs}ms`)
         lastError = `${model} rate limited`
-        console.log(`${model} rate limited — trying next model`)
+        if (waitMs > 0 && waitMs < 15000) await new Promise(r => setTimeout(r, waitMs))
+        continue
+      }
+
+      if (res.status === 400) {
+        console.warn(`${model} bad request — skipping`)
+        lastError = `${model} HTTP 400`
         continue
       }
 
@@ -144,7 +162,7 @@ async function llm(prompt: string, env: Env, maxTokens = 2048): Promise<string> 
       return text
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      if (msg.includes('API key is invalid')) throw err
+      if (msg.includes('key invalid')) throw err
       lastError = msg
       console.error(`${model} failed:`, err)
     }
@@ -422,12 +440,17 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
 
         console.log('Tutor chat: messages count:', messages.length, '| context:', body.pageContext ?? 'none')
 
-        // Try primary model first (multi-turn), then fall back through all 4 Groq models
-        const tutorModels = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it']
         let response = ''
         let lastError = ''
 
-        for (const model of tutorModels) {
+        for (let i = 0; i < GROQ_MODELS.length; i++) {
+          const model = GROQ_MODELS[i]
+          if (i > 0) {
+            const waitMs = Math.pow(2, i) * 1000
+            console.log(`Tutor waiting ${waitMs}ms before trying ${model}...`)
+            await new Promise(r => setTimeout(r, waitMs))
+          }
+
           try {
             const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
               method: 'POST',
@@ -441,12 +464,18 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
               throw new Error(`Groq key invalid (${res.status}): ${errBody}`)
             }
             if (res.status === 429) {
+              const retryAfter = res.headers.get('retry-after')
+              const waitMs = retryAfter ? parseInt(retryAfter) * 1000 : 3000
+              console.log(`Tutor ${model} rate limited. Waiting ${waitMs}ms`)
               lastError = `${model} rate limited`
+              if (waitMs > 0 && waitMs < 15000) await new Promise(r => setTimeout(r, waitMs))
               continue
             }
+            if (res.status === 400) {
+              lastError = `${model} HTTP 400`; continue
+            }
             if (!res.ok) {
-              lastError = `${model} HTTP ${res.status}`
-              continue
+              lastError = `${model} HTTP ${res.status}`; continue
             }
 
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }

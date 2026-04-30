@@ -135,9 +135,18 @@ function TopicCard({ domain, topic, autoExpand, onRef }: TopicCardProps) {
                 </div>
               )}
               {deepError && (
-                <div className="mt-4 text-center py-4">
-                  <p className="text-fail text-sm mb-2">{deepError}</p>
-                  <button onClick={deepLoad} className="text-gold text-sm border border-gold/40 rounded-lg px-4 py-1.5 hover:bg-gold/10 transition-colors">Retry</button>
+                <div className="mt-4 bg-fail/10 border border-fail/30 rounded-xl px-4 py-3 space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-fail text-sm">⚠ Failed to load deep dive</p>
+                    <button onClick={deepLoad} className="bg-gold text-navy font-bold px-3 py-1.5 rounded-lg text-xs flex-shrink-0 hover:bg-amber-400 transition-colors">↺ Retry</button>
+                  </div>
+                  <p className="text-mist text-xs">
+                    {deepError.includes('rate') || deepError.includes('429')
+                      ? 'Groq API is rate limited — wait a few seconds then retry.'
+                      : deepError.includes('key') || deepError.includes('403')
+                      ? 'API key issue — try refreshing the page.'
+                      : deepError}
+                  </p>
                 </div>
               )}
               {deepDive && !deepLoading && (
