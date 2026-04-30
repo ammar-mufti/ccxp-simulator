@@ -415,34 +415,62 @@ Output ONLY a raw JSON array with exactly 5 objects — no markdown, no explanat
 
       // ── Tutor chat ────────────────────────────────────────────────────────
       if (body.type === 'tutor-chat') {
-        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and bold for key terms, give mnemonics when helpful, keep responses under 200 words unless detail is needed.`
+        const systemPrompt = body.systemPrompt ?? `You are an expert CCXP exam coach helping a CX professional prepare for the CCXP certification exam this Saturday. You have deep knowledge of all 6 CCXP domains: CX Strategy (20%), Customer-Centric Culture (17%), Voice of Customer (20%), Experience Design (18%), Metrics & Measurement (15%), Organizational Adoption (10%). Current context: ${body.pageContext ?? 'General study session'}. Style: concise and exam-focused, use bullet points and **bold** for key terms, give mnemonics when helpful, keep responses under 200 words unless detail is needed.`
 
         const messages = (body.messages ?? []).slice(-10)
         const groqMessages = [{ role: 'system', content: systemPrompt }, ...messages]
 
+        console.log('Tutor chat: messages count:', messages.length, '| context:', body.pageContext ?? 'none')
+
+        // Try primary model first (multi-turn), then fall back through all 4 Groq models
+        const tutorModels = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768', 'gemma2-9b-it']
         let response = ''
-        try {
-          // Use multi-turn chat format directly with primary Groq model
-          const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
-            body: JSON.stringify({ model: 'llama-3.3-70b-versatile', messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
-          })
-          if (res.status === 429) throw new Error('rate_limit')
-          if (res.ok) {
+        let lastError = ''
+
+        for (const model of tutorModels) {
+          try {
+            const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.GROQ_API_KEY}` },
+              body: JSON.stringify({ model, messages: groqMessages, max_tokens: 1024, temperature: 0.5 }),
+            })
+            console.log(`Tutor ${model} status:`, res.status)
+
+            if (res.status === 401 || res.status === 403) {
+              const errBody = await res.text()
+              throw new Error(`Groq key invalid (${res.status}): ${errBody}`)
+            }
+            if (res.status === 429) {
+              lastError = `${model} rate limited`
+              continue
+            }
+            if (!res.ok) {
+              lastError = `${model} HTTP ${res.status}`
+              continue
+            }
+
             const data = await res.json() as { choices: Array<{ message: { content: string } }> }
             response = data.choices?.[0]?.message?.content ?? ''
-          }
-          if (!response) throw new Error('empty')
-        } catch {
-          try {
-            // Fallback: flatten conversation for single-turn APIs
-            const flatPrompt = systemPrompt + '\n\n' + messages.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n')
-            response = await llm(flatPrompt, env, 1024)
-          } catch {
-            response = "I'm having trouble connecting right now. Please try again in a moment."
+            if (response.trim()) {
+              console.log(`Tutor success with ${model}, reply length:`, response.length)
+              break
+            }
+            lastError = `${model} empty response`
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            if (msg.includes('key invalid')) {
+              return jsonRes({ error: msg }, 500, origin)
+            }
+            lastError = msg
+            console.error(`Tutor ${model} failed:`, msg)
           }
         }
+
+        if (!response.trim()) {
+          console.error('Tutor: all models failed, last error:', lastError)
+          return jsonRes({ error: `Tutor unavailable: ${lastError}` }, 500, origin)
+        }
+
         return jsonRes({ response }, 200, origin)
       }
 

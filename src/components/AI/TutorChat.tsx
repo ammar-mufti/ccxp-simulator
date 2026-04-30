@@ -8,11 +8,12 @@ import { DOMAIN_COLORS } from '../../store/examStore'
 const WORKER_URL = import.meta.env.VITE_WORKER_URL
 
 const STARTERS = [
-  'Explain NPS vs CES vs CSAT simply',
-  'What is the VoC closed loop?',
-  'How do I remember the CX Maturity stages?',
-  "What's the difference between a journey map and service blueprint?",
-  'Quiz me on Experience Design',
+  "What's the difference between CES and NPS?",
+  'Explain the VoC closed loop simply',
+  'Quiz me on CX Maturity Models',
+  'What are the 5 CCXP domains and their weights?',
+  'Give me a mnemonic for Design Thinking stages',
+  "What's the most common exam mistake in Metrics?",
 ]
 
 function renderMarkdown(text: string) {
@@ -114,11 +115,17 @@ export default function TutorChat() {
           pageContext,
         }),
       })
-      if (!res.ok) throw new Error(`${res.status}`)
-      const data = await res.json() as { response: string }
-      addMessage('assistant', data.response ?? 'Sorry, I could not generate a response.')
-    } catch {
-      addMessage('assistant', 'Connection error — please try again.')
+      const data = await res.json() as { response?: string; error?: string }
+      if (!res.ok || data.error) {
+        const msg = data.error ?? `Server error (${res.status})`
+        console.error('[TutorChat] error:', msg)
+        addMessage('assistant', `I'm temporarily unavailable — ${msg}. Please try again shortly.`)
+        return
+      }
+      addMessage('assistant', data.response?.trim() || 'Sorry, I could not generate a response.')
+    } catch (err) {
+      console.error('[TutorChat] fetch failed:', err)
+      addMessage('assistant', 'Could not reach the server — check your connection and try again.')
     } finally {
       setLoading(false)
     }
