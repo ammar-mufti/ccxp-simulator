@@ -57,6 +57,7 @@ export const useExamStore = create<ExamState>((set, get) => ({
   currentSetId: null,
 
   setMode(mode, domain) {
+    sessionStorage.removeItem('ccxp_timer_seconds')
     set({ mode, selectedDomain: domain ?? null, questions: [], answers: {}, currentIndex: 0, submitted: false, currentSetId: null })
   },
 

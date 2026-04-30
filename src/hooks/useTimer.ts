@@ -23,9 +23,12 @@ export function useTimer(initialSeconds: number, onExpire: () => void) {
   useEffect(() => { onExpireRef.current = onExpire }, [onExpire])
 
   const start = useCallback(() => {
-    // Restore from sessionStorage if available
+    // Only restore from sessionStorage if the saved value is close to initialSeconds
+    // (i.e. same exam mode) — prevents a previous mini/domain timer bleeding into full exam
     const saved = sessionStorage.getItem('ccxp_timer_seconds')
-    const startVal = saved ? parseInt(saved, 10) : initialSeconds
+    const savedVal = saved ? parseInt(saved, 10) : 0
+    const withinRange = savedVal > 0 && savedVal <= initialSeconds
+    const startVal = withinRange ? savedVal : initialSeconds
     setSecondsLeft(startVal)
     setRunning(true)
   }, [initialSeconds, setSecondsLeft, setRunning])

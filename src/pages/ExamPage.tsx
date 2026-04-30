@@ -43,7 +43,9 @@ function ActiveExam() {
     <div className="min-h-screen bg-navy flex flex-col">
       {/* Top bar */}
       <div className="bg-ink border-b border-white/10 px-4 py-3 flex items-center justify-between sticky top-0 z-40">
-        <div className="text-mist text-sm">{questions.length}Q · {mode} exam</div>
+        <div className="text-mist text-sm">
+          {questions.length}Q · {mode === 'full' ? 'Full Exam' : mode === 'mini' ? 'Mini Drill' : 'Domain Drill'}
+        </div>
         <TimerDisplay formatted={formatted} timerColor={timerColor} timerPulse={timerPulse} />
         <div className="text-mist text-sm">{Object.keys(answers).length}/{questions.length}</div>
       </div>

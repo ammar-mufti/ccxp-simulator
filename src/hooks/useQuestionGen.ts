@@ -332,6 +332,53 @@ export function useQuestionGen() {
       allQuestions.push(...domainQuestions.slice(0, targetCount))
     }
 
+    // ── Gap-fill pass ────────────────────────────────────────────────────────
+    // Check each domain — if any came up short, do a targeted retry
+    console.log('[QuestionGen] Domain results:')
+    for (const d of domains) {
+      const target = domain ? (weights[d] ?? 10) : (weights[d] ?? 0)
+      const got = allQuestions.filter(q => q.domain === d).length
+      console.log(`  ${d}: ${got}/${target}${got < target ? ' ⚠️ SHORT' : ' ✓'}`)
+
+      const deficit = target - got
+      if (deficit <= 0) continue
+
+      console.warn(`[QuestionGen] ${d}: short by ${deficit} — gap-fill retry`)
+      onProgress({
+        percent: Math.min(Math.round((questionsCollected / totalNeeded) * 100), 99),
+        collected: questionsCollected,
+        total: totalNeeded,
+        currentDomain: d,
+        message: `Filling gaps in ${d} (need ${deficit} more)…`,
+      })
+
+      const seenStems = [...seenQuestions].map(k => k.substring(0, 40)).slice(0, 10)
+      const gapPrompt = buildPrompt(d, Math.min(deficit, CHUNK_SIZE), seenStems)
+
+      for (let attempt = 0; attempt < CHUNK_RETRIES; attempt++) {
+        try {
+          const raw = await callLLM(
+            { type: 'generate-questions', domain: d, count: Math.min(deficit, CHUNK_SIZE), extra: gapPrompt },
+            token
+          )
+          const batch = parseQuestions(raw, d)
+          const unique = batch.filter(q => {
+            const key = q.q.trim().toLowerCase().substring(0, 60)
+            if (seenQuestions.has(key)) return false
+            seenQuestions.add(key)
+            return true
+          })
+          allQuestions.push(...unique)
+          questionsCollected += unique.length
+          console.log(`[QuestionGen] ${d} gap-fill: added ${unique.length}`)
+          break
+        } catch (err) {
+          console.warn(`[QuestionGen] ${d} gap-fill attempt ${attempt + 1} failed:`, err)
+          if (attempt < CHUNK_RETRIES - 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+        }
+      }
+    }
+
     console.log('[QuestionGen] Total before final dedup:', allQuestions.length)
 
     // Final dedup safety net (same 60-char key)
@@ -344,6 +391,7 @@ export function useQuestionGen() {
     })
 
     console.log('[QuestionGen] After final dedup:', dedupedQuestions.length)
+    console.log('[QuestionGen] Weights sum:', Object.values(weights).reduce((a, b) => a + b, 0), '| Expected:', totalNeeded)
 
     // Guard: refuse to start exam if we got less than 80% of what we needed
     const minimumRequired = Math.max(Math.floor(totalNeeded * 0.8), 1)
