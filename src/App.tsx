@@ -36,6 +36,19 @@ export default function App() {
   const init = useAuthStore(s => s.init)
   useEffect(() => { init() }, [init])
 
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_WORKER_URL}/api/health`)
+      .then(r => r.json())
+      .then((data: { status: string; groq: string; keyPrefix: string }) => {
+        if (data.status !== 'healthy') {
+          console.error('[health] Worker unhealthy:', data)
+        } else {
+          console.log(`[health] Groq connected (key: ${data.keyPrefix}…)`)
+        }
+      })
+      .catch(e => console.error('[health] check failed:', e))
+  }, [])
+
   return (
     <BrowserRouter basename="/ccxp-simulator">
       <OfflineBanner />

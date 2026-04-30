@@ -226,6 +226,27 @@ export default {
       return Response.redirect(`https://ammar-mufti.github.io/ccxp-simulator/login?token=${jwt}`, 302)
     }
 
+    // Health check — no auth required, uses /models (no token cost)
+    if (url.pathname === '/api/health' && request.method === 'GET') {
+      const keyPrefix = env.GROQ_API_KEY?.substring(0, 8) ?? 'missing'
+      const keyLength = env.GROQ_API_KEY?.length ?? 0
+      try {
+        const res = await fetch('https://api.groq.com/openai/v1/models', {
+          headers: { Authorization: `Bearer ${env.GROQ_API_KEY}` },
+        })
+        const isValid = res.ok
+        return jsonRes({
+          status: isValid ? 'healthy' : 'unhealthy',
+          groq: isValid ? 'connected' : 'key invalid',
+          keyPrefix,
+          keyLength,
+          timestamp: new Date().toISOString(),
+        }, 200, origin)
+      } catch (err) {
+        return jsonRes({ status: 'error', error: String(err), keyPrefix, keyLength }, 500, origin)
+      }
+    }
+
     // Public test endpoint — checks Groq key without requiring JWT
     if (url.pathname === '/api/test-groq' && request.method === 'GET') {
       const keyPrefix = env.GROQ_API_KEY?.substring(0, 8) ?? 'MISSING'
